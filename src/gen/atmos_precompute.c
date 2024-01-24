@@ -163,9 +163,10 @@ int get_tau_rct(float x, float y, float* r, float* muS) {
 
   double *ds;
   // map xr yr to unit disk centered around origin
-  square2disk2(muS, r, xr, yr);
-  // *r = EARTHRADIUS + yr * yr * ATMOSHEIGHT;
-  // *muS = -0.15 + tan(1.5 * xr) / tan(1.5) * (1.0 + 0.15);
+  // square2disk2(muS, r, xr, yr);
+  *r = EARTHRADIUS + yr * yr * ATMOSHEIGHT;
+  *muS = -0.15 + tan(1.5 * xr) / tan(1.5) * (1.0 + 0.15);
+  // printf("r: %f, muS: %f\n", *r, *muS);
   return 1;
 }
 
@@ -203,13 +204,14 @@ set_transmittance_interpolator(FILE *fp, INTERP2* trans_ip, float* transmittance
     float ct;
     for (unsigned int j = 0; j < TRANSMITTANCE_H; ++j) {
         for (unsigned int i = 0; i < TRANSMITTANCE_W; ++i) {
-            float x = (float)i / TRANSMITTANCE_W;
-            float y = (float)j / TRANSMITTANCE_H;
-            trans_ip->spt[i+TRANSMITTANCE_W*j][0] = x;
-            trans_ip->spt[i+TRANSMITTANCE_W*j][1] = y;
-            get_tau_rct(x+0.5, y+0.5, &r, &ct);
+            // float x = (float)i / TRANSMITTANCE_W;
+            // float y = (float)j / TRANSMITTANCE_H;
+            trans_ip->spt[i+TRANSMITTANCE_W*j][0] = i;
+            trans_ip->spt[i+TRANSMITTANCE_W*j][1] = j;
+            get_tau_rct(i+0.5, j+0.5, &r, &ct);
             transmittance[i+TRANSMITTANCE_W*j] = compute_optical_depth(HR_MS, r, ct);
-            fprintf(fp, "%f %f %f\n", x, y, transmittance[i+j*TRANSMITTANCE_W]);
+            printf("transmittance: %f\n", transmittance[i+TRANSMITTANCE_W*j]);
+            fprintf(fp, "%d %d %f\n", i, j, transmittance[i+j*TRANSMITTANCE_W]);
         }
     }
 }
@@ -292,14 +294,17 @@ precompute(int sorder)
     INTERP2 *insr_ip = interp2_alloc(nsamp);
     INTERP2 *insm_ip = interp2_alloc(nsamp);
 
+    printf("setting interpolators...\n");
     interp2_free(tau_ip);
     char *tname = "tau.dat";
     FILE *fp;
     // Load transmittance data
     if ((fp = fopen(tname, "r")) != NULL) {
+        printf("reading transmittance data from file...\n");
         load_transmittance(fp, tau_ip, transmittance);
     } else {
         fp = fopen(tname, "w");
+        printf("writing transmittance data to file...\n");
         set_transmittance_interpolator(fp, tau_ip, transmittance);
         // save transmittance data to file
     };
@@ -315,6 +320,7 @@ precompute(int sorder)
 int
 main(int argc, char *argv[])
 {
+    printf("precomputing...\n");
     precompute(1);
     return 1;
 }
