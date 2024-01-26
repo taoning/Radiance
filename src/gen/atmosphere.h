@@ -2,7 +2,9 @@
 #define _ATMOSPHERE_H
 
 #include "color.h"
+#include "paths.h"
 #include "rtmath.h"
+#include "rtio.h"
 
 extern const double HR_MS;
 extern const double HR_MW;

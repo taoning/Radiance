@@ -71,7 +71,7 @@ mksource:	mksource.o
 	$(CC) $(CFLAGS) -o mksource mksource.o \
 -lraycalls -lradiance -lrtrad $(MLIB)
 
-genrev:	genrev.o 
+genrev:	genrev.o
 	$(CC) $(CFLAGS) -o genrev genrev.o -lrtrad $(MLIB)
 
 gencatenary: gencat.o
@@ -88,6 +88,10 @@ genclock:	genclock.o
 
 genbranch:	genbranch.o
 	$(CC) $(CFLAGS) -o genbranch genbranch.o $(MLIB)
+
+atmos_precompute: atmos_precompute.o
+	$(CC) $(CFLAGS) -lrtrad -o atmos_precompute atmos_precompute.o ../rt/data.c $(MLIB)
+
 
 mksource.o:	../common/random.h ../rt/ray.h ../common/octree.h \
 ../common/object.h ../common/color.h \
@@ -127,3 +131,5 @@ gendaylit.o gensky.o sun.o:	sun.h
 
 gendaymtx.o:	../common/platform.h ../common/rtmath.h \
 ../common/mat4.h ../common/fvect.h ../common/color.h
+
+atmos_precompute.o: ../common/rtio.h ../common/rtmath.h ../rt/data.h ../common/paths.h ../common/color.h

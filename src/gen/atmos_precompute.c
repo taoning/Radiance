@@ -1,7 +1,9 @@
 #include "atmosphere.h"
+#include "data.h"
 #include "interp2d.h"
 #include "fvect.h"
 
+char *progname;
 
 const double EARTHRADIUS = 6360e3;
 const double ATMOSRADIUS = 6460e3;
@@ -9,6 +11,9 @@ const double ATMOSHEIGHT = ATMOSRADIUS - EARTHRADIUS;
 const double ATMOSRADIUS_M = 6395e3;
 const unsigned int TRANSMITTANCE_W = 256;
 const unsigned int TRANSMITTANCE_H = 64;
+const float START_WVL = 380.0;
+const float END_WVL = 780.0;
+const unsigned int NSAMP = 20;
 
 // Scale heights (m)
 // Rayleigh scattering
@@ -123,50 +128,13 @@ hit_sphere(const double r, const double ct, const double radius, double *roots)
     return 1;
 }
 
-void
-square2disk2(float *phi, float *r, double seedx, double seedy)
-{
-
-   double a = 2.*seedx - 1;   /* (a,b) is now on [-1,1]^2 */
-   double b = 2.*seedy - 1;
-
-   if (a > -b) {     /* region 1 or 2 */
-       if (a > b) {  /* region 1, also |a| > |b| */
-           *r = a;
-           *phi = (M_PI/4.) * (b/a);
-       }
-       else       {  /* region 2, also |b| > |a| */
-           *r = b;
-           *phi = (M_PI/4.) * (2. - (a/b));
-       }
-   }
-   else {        /* region 3 or 4 */
-       if (a < b) {  /* region 3, also |a| >= |b|, a != 0 */
-            *r = -a;
-            *phi = (M_PI/4.) * (4. + (b/a));
-       }
-       else       {  /* region 4, |b| >= |a|, but a==0 and b==0 could occur. */
-            *r = -b;
-            if (b != 0.)
-                *phi = (M_PI/4.) * (6. - (a/b));
-            else
-                *phi = 0.;
-       }
-   }
-   *r *= 0.9999999999999;	/* prophylactic against MS sin()/cos() impl. */
-}
 
 static
 int get_tau_rct(float x, float y, float* r, float* muS) {
   float xr = x / TRANSMITTANCE_W;
   float yr = y / TRANSMITTANCE_H;
-
-  double *ds;
-  // map xr yr to unit disk centered around origin
-  // square2disk2(muS, r, xr, yr);
   *r = EARTHRADIUS + yr * yr * ATMOSHEIGHT;
   *muS = -0.15 + tan(1.5 * xr) / tan(1.5) * (1.0 + 0.15);
-  // printf("r: %f, muS: %f\n", *r, *muS);
   return 1;
 }
 
@@ -197,23 +165,39 @@ compute_optical_depth(const float scale_height, const float radius, const float 
 }
 
 static
+int
+compute_transmittance(double *sumr, const float r, const float ct)
+{
+    double taur = compute_optical_depth(HR_MS, r, ct);
+    double taum = compute_optical_depth(HMS_CC, r, ct);
+    for (int i = 0; i < NSAMP; ++i) {
+        sumr[i] = exp(-(taur * BR0_MS[i] + taum * BM0_CC[i]));
+    }
+    return 1;
+}
+
+static
 void
-set_transmittance_interpolator(FILE *fp, INTERP2* trans_ip, float* transmittance)
+write_transmittance_data(char *fname)
 {
     float r;
     float ct;
+    double tau[NSAMP];
+    FILE *fp = fopen(fname, "w");
+    fprintf(fp, "3\n");
+    fprintf(fp, "0 %d %d\n", TRANSMITTANCE_W, TRANSMITTANCE_W);
+    fprintf(fp, "0 %d %d\n", TRANSMITTANCE_H, TRANSMITTANCE_H);
+    fprintf(fp, "%f %f %d\n", START_WVL, END_WVL, NSAMP);
     for (unsigned int j = 0; j < TRANSMITTANCE_H; ++j) {
         for (unsigned int i = 0; i < TRANSMITTANCE_W; ++i) {
-            // float x = (float)i / TRANSMITTANCE_W;
-            // float y = (float)j / TRANSMITTANCE_H;
-            trans_ip->spt[i+TRANSMITTANCE_W*j][0] = i;
-            trans_ip->spt[i+TRANSMITTANCE_W*j][1] = j;
             get_tau_rct(i+0.5, j+0.5, &r, &ct);
-            transmittance[i+TRANSMITTANCE_W*j] = compute_optical_depth(HR_MS, r, ct);
-            printf("transmittance: %f\n", transmittance[i+TRANSMITTANCE_W*j]);
-            fprintf(fp, "%d %d %f\n", i, j, transmittance[i+j*TRANSMITTANCE_W]);
+            compute_transmittance(tau, r, ct);
+            for (int k = 0; k < NSAMP; ++k) {
+                fprintf(fp, "%f\n", tau[k]);
+            }
         }
     }
+    fclose(fp);
 }
 
 static
@@ -233,39 +217,27 @@ set_inscatter_interpolator(INTERP2* ins_ip, double* inscatter)
 
 static
 int
-get_tau_xy(double *x, double *y, const double r, const double ct) {
-	// *x = sqrt((r - EARTHRADIUS) / (ATMOSRADIUS - EARTHRADIUS));
-	// *y = atan((ct + 0.15) / (1.0 + 0.15) * tan(1.5)) / (1.5);
-    double r_norm = (r - EARTHRADIUS) / ATMOSHEIGHT;
-    double sin_theta = sqrt(1 - ct * ct);
-
-    double dx = r_norm * sin_theta;
-    double dy = r_norm * ct;
-    double sq[2];
-    disk2square(sq, dx, dy);
-    *x = sq[0];
-    *y = sq[1];
+get_tau_xy(double *xy, const double r, const double ct) {
+	xy[0] = sqrt((r - EARTHRADIUS) / (ATMOSRADIUS - EARTHRADIUS));
+	xy[1] = atan((ct + 0.15) / (1.0 + 0.15) * tan(1.5)) / (1.5);
     return 1;
 }
 
 
 static
-float
-interpolate_transmittance(INTERP2* ip, double r, double ct, float* transmittance)
+int
+interpolate_transmittance(double *result, DATARRAY* dp, double r, double ct)
 {
-    float wt[ip->ns];
     double x, y;
+    double pt[3];
     int i;
-    get_tau_xy(&x, &y, r, ct);
-    if (!interp2_weights(wt, ip, x, y))
-        exit(1);
-    float result = 0;
-    printf("tau300: %f\n", transmittance[16383]);
-    for (i=0; i < ip->ns; i++) {
-        // printf("wt: %f, transmittance: %f\n", wt[i], transmittance[i]);
-        result += wt[i] * transmittance[i];
+    get_tau_xy(pt, r, ct);
+    for (i = 0; i < NSAMP; ++i) {
+        pt[2] = START_WVL + i * (END_WVL - START_WVL) / (NSAMP - 1);
+        result[i] = datavalue(dp, pt);
     }
-    return result;
+    printf("pt: %f %f\n", pt[0], pt[1]);
+    return 1;
 }
 
 
@@ -290,29 +262,25 @@ precompute(int sorder)
 {
     const int nsamp = TRANSMITTANCE_H * TRANSMITTANCE_W;
     float transmittance[nsamp];
-    INTERP2 *tau_ip = interp2_alloc(nsamp);
-    INTERP2 *insr_ip = interp2_alloc(nsamp);
-    INTERP2 *insm_ip = interp2_alloc(nsamp);
+    DATARRAY *tau_dp;
+
 
     printf("setting interpolators...\n");
-    interp2_free(tau_ip);
     char *tname = "tau.dat";
     FILE *fp;
-    // Load transmittance data
-    if ((fp = fopen(tname, "r")) != NULL) {
-        printf("reading transmittance data from file...\n");
-        load_transmittance(fp, tau_ip, transmittance);
-    } else {
-        fp = fopen(tname, "w");
+    if (getpath(tname, getrlibpath(), R_OK) == NULL) {
         printf("writing transmittance data to file...\n");
-        set_transmittance_interpolator(fp, tau_ip, transmittance);
-        // save transmittance data to file
+        write_transmittance_data(tname);
     };
-    fclose(fp);
+    tau_dp = getdata(tname);
+
     double r = 6361e3;
     double ct = 0.5;
-    float tau = interpolate_transmittance(tau_ip, r, ct, transmittance);
-    printf("tau: %f\n", tau);
+    double tau[NSAMP];
+    interpolate_transmittance(tau, tau_dp, r, ct);
+    for (int i = 0; i < NSAMP; ++i) {
+        printf("tau: %f\n", tau[i]);
+    }
     return 1;
 }
 
@@ -320,6 +288,8 @@ precompute(int sorder)
 int
 main(int argc, char *argv[])
 {
+
+	progname = "atmos_precompute";
     printf("precomputing...\n");
     precompute(1);
     return 1;
