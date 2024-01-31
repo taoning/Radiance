@@ -8,6 +8,7 @@ cmake_policy(SET CMP0074 NEW)
 set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/resources/cmake/modules")
 
 set(SUPPORTED_LANGUAGES C CXX)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Get the project version.
 set(VERSIONFILE "${CMAKE_CURRENT_LIST_DIR}/src/rt/VERSION")

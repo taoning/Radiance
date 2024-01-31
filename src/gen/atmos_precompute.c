@@ -2,11 +2,12 @@
 #include "data.h"
 #include "interp2d.h"
 #include "fvect.h"
+#include <stdio.h>
 
 char *progname;
 
 const double EARTHRADIUS = 6360e3;
-const double ATMOSRADIUS = 6460e3;
+const double ATMOSRADIUS = 6420e3;
 const double ATMOSHEIGHT = ATMOSRADIUS - EARTHRADIUS;
 const double ATMOSRADIUS_M = 6395e3;
 const unsigned int TRANSMITTANCE_W = 256;
@@ -32,6 +33,11 @@ const int WVLSPAN = 400;            // 380nm to 780nm
 
 // Aerosol optical depth at 550nm for continental clean
 const double AOD_CC_550 = 0.05352;
+
+const int TRANSMITTANCE_INTEGRAL_SAMPLES = 500;
+const int IRRADIANCE_INTEGRAL_SAMPLES = 32;
+const int INSCATTER_INTEGRAL_SAMPLES = 50;
+const int INSCATTER_SPHERICAL_INTEGRAL_SAMPLES = 16;
 
 /** 380nm to 780nm at 20nm intervals **/
 // Extraterrestrial solar W/m^2/nm
@@ -86,8 +92,12 @@ const SCOLOR AM0_CA = {7.671e-06, 7.3e-06, 6.961e-06, 6.625e-06, 6.347e-06,
     4.8e-06, 4.685e-06, 4.538e-06, 4.386e-06, 4.279e-06, 4.218e-06, 4.159e-06, 4.104e-06};
 
 
-static void
-swap12(double *a, double *b)
+const unsigned int RES_R = 32;
+const unsigned int RES_MU = 128;
+const unsigned int RES_MU_S = 32;
+const unsigned int RES_NU = 8;
+
+static void swap12(double *a, double *b)
 {
     double tmp = *a;
     *a = *b;
@@ -95,8 +105,7 @@ swap12(double *a, double *b)
 }
 
 
-static double
-linear_interp(double x, const double *xp, const double *fp, int size)
+static double linear_interp(double x, const double *xp, const double *fp, int size)
 {
     if (x <= xp[0]) {
         return fp[0];
@@ -112,8 +121,7 @@ linear_interp(double x, const double *xp, const double *fp, int size)
 }
 
 
-static int
-hit_sphere(const double r, const double ct, const double radius, double *roots)
+static int hit_sphere(double *roots, const double r, const double ct, const double radius)
 {
     float A = 1;
     float B = -2 * r * ct;
@@ -128,70 +136,93 @@ hit_sphere(const double r, const double ct, const double radius, double *roots)
     return 1;
 }
 
-
-static
-int get_tau_rct(float x, float y, float* r, float* muS) {
-  float xr = x / TRANSMITTANCE_W;
-  float yr = y / TRANSMITTANCE_H;
-  *r = EARTHRADIUS + yr * yr * ATMOSHEIGHT;
-  *muS = -0.15 + tan(1.5 * xr) / tan(1.5) * (1.0 + 0.15);
-  return 1;
+ 
+double limit(double r, double mu) {
+  double d_out = -r * mu + sqrt(r * r * (mu * mu - 1.0) + (ATMOSRADIUS+1e3) * (ATMOSRADIUS+1e3));
+  double delta_sq = r * r * (mu * mu - 1.0) + EARTHRADIUS * EARTHRADIUS;
+  if (delta_sq >= 0.0) {
+    double d_in = -r * mu - sqrt(delta_sq);
+    if (d_in >= 0.0) {
+      d_out = d_out < d_in ? d_out : d_in;
+    }
+  }
+  return d_out;
 }
 
 
-float
-compute_optical_depth(const float scale_height, const float radius, const float ct)
+static double compute_optical_depth(const double scale_height, const double radius, const double ctheta)
 {
     double seg = 0;
-    float result = 0;
-    double roots[2] = {0};
+    double result = 0;
+    double roots[2] = {0, 0};
     unsigned int i;
 
-    if (!hit_sphere(radius, ct, ATMOSRADIUS, roots) || roots[1] < 0)
-        return 0;
-    const float tmax = roots[1];
-    const float apprx_seglen = 200;
+    // if (!hit_sphere(roots, radius, ctheta, ATMOSRADIUS) || roots[1] < 0)
+    //     return 0;
+    // const double tmax = roots[1];
+    const double tmax = limit(radius, ctheta);
+    FILE *fp = fopen("tmax.txt", "a");
+    fprintf(fp, " %f\n", tmax);
+    fclose(fp);
+    const double apprx_seglen = 200.;
     const unsigned int nsamp = (tmax / apprx_seglen) ? tmax / apprx_seglen : 2;
-    const float seglen = tmax / nsamp;
+    const double seglen = tmax / nsamp;
     double optical_depth = exp(-(radius - EARTHRADIUS) / scale_height);
     for (i = 0; i < nsamp; ++i) {
         seg += seglen;
-        const float _r = sqrt(radius * radius + seg * seg + 2 * radius * seg * ct);
-        const float hr = exp(-(_r - EARTHRADIUS) / scale_height);
+        const double _r = sqrt(radius * radius + seg * seg + 2 * radius * seg * ctheta);
+        const double hr = exp(-(_r - EARTHRADIUS) / scale_height);
         result += (optical_depth + hr) * seglen * 0.5;
         optical_depth = hr;
     }
-    return result;
+    double ct_horizon = -sqrt(1.0 - (EARTHRADIUS / radius) * (EARTHRADIUS / radius));
+    return ctheta < ct_horizon ? 1e9 : result;
 }
 
-static
-int
-compute_transmittance(double *sumr, const float r, const float ct)
+
+static int compute_transmittance(double *sumr, const double r, const double ct)
 {
-    double taur = compute_optical_depth(HR_MS, r, ct);
-    double taum = compute_optical_depth(HMS_CC, r, ct);
+    const double taur = compute_optical_depth(HR_MS, r, ct);
+    const double taum = compute_optical_depth(HMS_CC, r, ct);
+    FILE *fp = fopen("tau.txt", "a");
+    fprintf(fp, " %f %f\n", taur, taum);
+    fclose(fp);
     for (int i = 0; i < NSAMP; ++i) {
         sumr[i] = exp(-(taur * BR0_MS[i] + taum * BM0_CC[i]));
     }
     return 1;
 }
 
+
 static
 void
 write_transmittance_data(char *fname)
 {
-    float r;
-    float ct;
+    double radi;
+    double ctheta;
     double tau[NSAMP];
     FILE *fp = fopen(fname, "w");
+
+    /* .dat file header */
     fprintf(fp, "3\n");
     fprintf(fp, "0 %d %d\n", TRANSMITTANCE_W, TRANSMITTANCE_W);
     fprintf(fp, "0 %d %d\n", TRANSMITTANCE_H, TRANSMITTANCE_H);
-    fprintf(fp, "%f %f %d\n", START_WVL, END_WVL, NSAMP);
+    fprintf(fp, "0 %d %d\n", NSAMP, NSAMP);
+
     for (unsigned int j = 0; j < TRANSMITTANCE_H; ++j) {
         for (unsigned int i = 0; i < TRANSMITTANCE_W; ++i) {
-            get_tau_rct(i+0.5, j+0.5, &r, &ct);
-            compute_transmittance(tau, r, ct);
+
+            /* x, y to radius and cos(theta) */
+            float xr = (i + 0.5) / TRANSMITTANCE_W;
+            float yr = (j + 0.5) / TRANSMITTANCE_H;
+            radi = EARTHRADIUS + yr * yr * ATMOSHEIGHT;
+            ctheta = -0.15 + tan(1.5 * xr) / tan(1.5) * 1.15;
+
+            // FILE *fp2 = fopen("tau.txt", "a");
+            // fprintf(fp2, "%f %f %f %f", i+0.5, j+0.5, radi, ctheta);
+            // fclose(fp2);
+
+            compute_transmittance(tau, radi, ctheta);
             for (int k = 0; k < NSAMP; ++k) {
                 fprintf(fp, "%f\n", tau[k]);
             }
@@ -200,60 +231,180 @@ write_transmittance_data(char *fname)
     fclose(fp);
 }
 
-static
-void
-set_inscatter_interpolator(INTERP2* ins_ip, double* inscatter)
-{
-    for (unsigned int j = 0; j < TRANSMITTANCE_H; ++j) {
-        for (unsigned int i = 0; i < TRANSMITTANCE_W; ++i) {
-            double x = (double)i / TRANSMITTANCE_W;
-            double y = (double)j / TRANSMITTANCE_H;
-            ins_ip->spt[i+j*i][0] = x;
-            ins_ip->spt[i+j*i][1] = y;
-            inscatter[i+j*i] = compute_optical_depth(HR_MS, ATMOSRADIUS, y);
-        }
-    }
-}
 
 static
 int
-get_tau_xy(double *xy, const double r, const double ct) {
-	xy[0] = sqrt((r - EARTHRADIUS) / (ATMOSRADIUS - EARTHRADIUS));
-	xy[1] = atan((ct + 0.15) / (1.0 + 0.15) * tan(1.5)) / (1.5);
-    return 1;
-}
-
-
-static
-int
-interpolate_transmittance(double *result, DATARRAY* dp, double r, double ct)
+interpolate_transmittance(double *result, DATARRAY* dp, double radius, double ctheta)
 {
     double x, y;
     double pt[3];
     int i;
-    get_tau_xy(pt, r, ct);
+    pt[1] = sqrt((radius - EARTHRADIUS) / ATMOSHEIGHT) * TRANSMITTANCE_H;
+    pt[0] = (atan((ctheta + 0.15) / 1.15 * tan(1.5)) / 1.5) * TRANSMITTANCE_W;
     for (i = 0; i < NSAMP; ++i) {
-        pt[2] = START_WVL + i * (END_WVL - START_WVL) / (NSAMP - 1);
+        pt[2] = i;
+        printf("pt: %f %f %f\n", pt[0], pt[1], pt[2]);
         result[i] = datavalue(dp, pt);
     }
-    printf("pt: %f %f\n", pt[0], pt[1]);
     return 1;
 }
 
 
-static
-int
-load_transmittance(FILE *fp, INTERP2* ip, float* transmittance)
-{
-    for (unsigned int j = 0; j < TRANSMITTANCE_H; ++j) {
-        for (unsigned int i = 0; i < TRANSMITTANCE_W; ++i) {
-            float x, y;
-            fscanf(fp, "%f %f %f\n", &x, &y, &transmittance[i+j*TRANSMITTANCE_W]);
-            ip->spt[i+j*TRANSMITTANCE_W][0] = x;
-            ip->spt[i+j*TRANSMITTANCE_W][1] = y;
+static void set_layer(int layer, double* r, double* dmin, double* dmax, double* dminp, double* dmaxp) {
+    double u = (layer * layer) / ((RES_R - 1.0) * (RES_R - 1.0));
+    *r = sqrt(EARTHRADIUS * EARTHRADIUS + u * (ATMOSRADIUS * ATMOSRADIUS - EARTHRADIUS * EARTHRADIUS)) + (layer == 0 ? 0.01 : (layer == RES_R - 1 ? -0.001 : 0.0));
+    *dmin = ATMOSRADIUS - *r;
+    *dmax = sqrt((*r) * (*r) - EARTHRADIUS * EARTHRADIUS) + sqrt(ATMOSRADIUS * ATMOSRADIUS - EARTHRADIUS * EARTHRADIUS);
+    *dminp = *r - EARTHRADIUS;
+    *dmaxp = sqrt((*r) * (*r) - EARTHRADIUS * EARTHRADIUS);
+}
+
+
+void compute_inscatter1_integrand(DATARRAY *tau_dp, double radius, double ct_view, double ct_sun, double ct_view_sun, double xj, double *rayleigh, double *mie) {
+    double iradius = sqrt(radius * radius + xj * xj + 2 * radius * xj * ct_view);
+    double isun_theta = (ct_view_sun * xj + ct_sun * radius) / iradius;
+    iradius = iradius > EARTHRADIUS ? iradius : EARTHRADIUS;
+    if (isun_theta >= -sqrt(1.0 - EARTHRADIUS * EARTHRADIUS / (iradius * iradius))) {
+        double tau[NSAMP];
+        double taui[NSAMP];
+        interpolate_transmittance(tau, tau_dp, radius, ct_view);
+        interpolate_transmittance(taui, tau_dp, iradius, isun_theta);
+        for (int i = 0; i < NSAMP; ++i) {
+            double ti = tau[i] * taui[i];
+            rayleigh[i] = ti * exp(-(iradius - EARTHRADIUS) / HR_MS);
+            mie[i] = ti * exp(-(iradius - EARTHRADIUS) / HR_MS);
+        }
+    } else {
+        for (int i = 0; i < NSAMP; ++i) {
+            rayleigh[i] = 0;
+            mie[i] = 0;
         }
     }
-    return 1;
+}
+
+
+void ComputeInscatter1(
+    const TransmittanceTexture& transmittance_sampler, Length r, Length dmin,
+    Length dmax, Length dminp, Length dmaxp, vec2 xy,
+    IrradianceSpectrum* rayleigh, IrradianceSpectrum* mie) {
+  Number mu, muS, nu;
+  Number x = xy.x - 0.5;
+  Number y = xy.y - 0.5;
+  if (y < RES_MU / 2.0) {
+    Length d = (1.0 - y / (RES_MU / 2.0 - 1.0)) * dmaxp;
+    d = min(max(dminp, d), dmaxp * 0.999);
+    *mu = (Rg * Rg - r * r - d * d) / (2.0 * r * d);
+    *mu = min(*mu, -sqrt(1.0 - (Rg / r) * (Rg / r)) - 0.001);
+  } else {
+    Length d = ((y - RES_MU / 2.0) / (RES_MU / 2.0 - 1.0)) * dmax;
+    d = min(max(dmin, d), dmax * 0.999);
+    *mu = (Rt * Rt - r * r - d * d) / (2.0 * r * d);
+  }
+  *muS = mod(x, RES_MU_S) / (RES_MU_S - 1.0);
+  // paper formula
+  // muS = -(0.6 + log(1.0 - muS * (1.0 -  exp(-3.6)))) / 3.0;
+  // better formula
+  *muS = tan((2.0 * *muS - 1.0 + 0.26) * 1.1 * rad) / tan(1.26 * 1.1 * rad);
+  *nu = -1.0 + floor(x / RES_MU_S) / (RES_NU - 1) * 2.0;
+
+  DimensionlessSpectrum ray_sum = DimensionlessSpectrum(0.0);
+  DimensionlessSpectrum mie_sum = DimensionlessSpectrum(0.0);
+  Length dx = Limit(r, mu) / INSCATTER_INTEGRAL_SAMPLES;
+  DimensionlessSpectrum rayi;
+  DimensionlessSpectrum miei;
+  ComputeInscatter1Integrand(
+      transmittance_sampler, r, mu, muS, nu, 0.0 * m, &rayi, &miei);
+  for (int i = 1; i <= INSCATTER_INTEGRAL_SAMPLES; ++i) {
+    Length xj = i * dx;
+    DimensionlessSpectrum rayj;
+    DimensionlessSpectrum miej;
+    ComputeInscatter1Integrand(
+        transmittance_sampler, r, mu, muS, nu, xj, &rayj, &miej);
+    ray_sum += (rayi + rayj);
+    mie_sum += (miei + miej);
+    rayi = rayj;
+    miei = miej;
+  }
+  *rayleigh = ray_sum * (dx / 2) * RayleighScattering() * SolarSpectrum();
+  *mie = mie_sum * (dx / 2) * MieScattering() * SolarSpectrum();
+}
+
+void compute_inscatter1(DATARRAY *tau_dp, double radius, double dmin, double dmax, double dminp, double dmaxp, double i, double j, double *rayleigh, double *mie) {
+    double tau[NSAMP];
+
+    double i = i - 0.5;
+    double j = j - 0.5;
+    if (j < RES_MU / 2.0) {
+        double d = (1.0 - j / (RES_MU / 2.0 - 1.0)) * dmaxp;
+        d = min(max(dminp, d), dmaxp * 0.999);
+        double ct_view = (EARTHRADIUS * EARTHRADIUS - radius * radius - d * d) / (2.0 * radius * d);
+        ct_view = min(ct_view, -sqrt(1.0 - (EARTHRADIUS / radius) * (EARTHRADIUS / radius)) - 0.001);
+    } else {
+        double d = ((j - RES_MU / 2.0) / (RES_MU / 2.0 - 1.0)) * dmax;
+        d = min(max(dmin, d), dmax * 0.999);
+        double ct_view = (ATMOSRADIUS * ATMOSRADIUS - radius * radius - d * d) / (2.0 * radius * d);
+    }
+    ct_sun = mod(i, RES_MU_S) / (RES_MU_S - 1.0);
+    ct_sun = tan((2.0 * muS - 1.0 + 0.26) * 1.1 ) / tan(1.26 * 1.1);
+    nu = -1.0 + floor(i / RES_MU_S) / (RES_NU - 1) * 2.0;
+
+    double ray_sum = {0.0};
+    double mie_sum = {0.0};
+    double dx = limit(radius, ct_view) / INSCATTER_INTEGRAL_SAMPLES;
+    double *rayi;
+    double *miei;
+    compute_inscatter1_integrand(tau_dp, radius, ct_view, ct_sun, ct_view_sun, 0, rayi, miei)
+    for (int i=0; i<=INSCATTER_INTEGRAL_SAMPLES; ++i) {
+        double xj = i * dx;
+        double *rayj;
+        double *miej;
+        compute_inscatter1_integrand(tau_dp, radius, ct_view, ct_sun, ct_view_sun, xj, rayj, miej);
+        for (int j=0; j<NSAMP; ++j) {
+            ray_sum[j] = rayi[j] + rayj[j];
+            mie_sum[j] = miei[j] + miej[j];
+            rayi[j] = rayj[j];
+            miei[j] = miej[j];
+        }
+    }
+    for (int k=0; k<NSAMP; ++k) {
+        rayleigh[k] = ray_sum[k] * (dx / 2) * BR0_MS[k] * EXT_SOL[k];
+        mie[k] = mie_sum[k] * (dx / 2) * BM0_CC[k] * EXT_SOL[k];
+    }
+}
+
+
+void write_inscatter1(const DATARRAY *tau_dp, char *rname, char *mname) {
+    FILE *rfp = fopen(rname, "w");
+    FILE *mfp = fopen(mname, "w");
+    fprintf(rfp, "5\n");
+    fprintf(rfp, "0 %d %d\n", RES_R, RES_R);
+    fprintf(rfp, "0 %d %d\n", RES_MU, RES_MU);
+    fprintf(rfp, "0 %d %d\n", RES_MU_S, RES_MU_S);
+    fprintf(rfp, "0 %d %d\n", RES_NU, RES_NU);
+    fprintf(rfp, "0 %d %d\n", NSAMP, NSAMP);
+    fprintf(mfp, "5\n");
+    fprintf(mfp, "0 %d %d\n", RES_R, RES_R);
+    fprintf(mfp, "0 %d %d\n", RES_MU, RES_MU);
+    fprintf(mfp, "0 %d %d\n", RES_MU_S, RES_MU_S);
+    fprintf(mfp, "0 %d %d\n", RES_NU, RES_NU);
+    fprintf(mfp, "0 %d %d\n", NSAMP, NSAMP);
+    for (unsigned int k=0; k< RES_R; ++k) {
+        double radius, dmin, dmax, dminp, dmaxp;
+        set_layer(k, &radius, &dmin, &dmax, &dminp, &dmaxp);
+        for (unsigned int j=0; j< RES_MU; ++j) {
+            for (unsigned int i=0; i < RES_MU_S; ++i) {
+                for (unsigned int l=0; l < RES_NU; ++l) {
+                    double rayleigh[NSAMP];
+                    double mie[NSAMP];
+                    compute_inscatter1(tau_dp, radius, dmin, dmax, dminp, dmaxp, i+0.5, j+0.5, rayleigh, mie);
+                    for (int m = 0; m < NSAMP; ++m) {
+                        fprintf(rfp, "%f\n", rayleigh[m]);
+                        fprintf(mfp, "%f\n", mie[m]);
+                    }
+                }
+            }
+        }
+    }
 }
 
 
@@ -263,24 +414,34 @@ precompute(int sorder)
     const int nsamp = TRANSMITTANCE_H * TRANSMITTANCE_W;
     float transmittance[nsamp];
     DATARRAY *tau_dp;
+    DATARRAY *inscat1r_dp;
+    DATARRAY *inscat1m_dp;
 
 
     printf("setting interpolators...\n");
     char *tname = "tau.dat";
-    FILE *fp;
     if (getpath(tname, getrlibpath(), R_OK) == NULL) {
         printf("writing transmittance data to file...\n");
         write_transmittance_data(tname);
     };
     tau_dp = getdata(tname);
 
-    double r = 6361e3;
-    double ct = 0.5;
-    double tau[NSAMP];
-    interpolate_transmittance(tau, tau_dp, r, ct);
-    for (int i = 0; i < NSAMP; ++i) {
-        printf("tau: %f\n", tau[i]);
-    }
+    // double r = 6360e3;
+    // double ct = 0.5;
+    // double tau[NSAMP];
+    // interpolate_transmittance(tau, tau_dp, r, ct);
+    // for (int i = 0; i < NSAMP; ++i) {
+    //     printf("tau: %f\n", tau[i]);
+    // }
+    //
+    char *i1rname = "inscat1r.dat";
+    char *i1mname = "inscat1m.dat";
+    if (getpath(i1rname, getrlibpath(), R_OK) == NULL) {
+        printf("writing transmittance data to file...\n");
+        write_inscat1_data(i1rname);
+    };
+    tau_dp = getdata(tname);
+    
     return 1;
 }
 
@@ -289,7 +450,7 @@ int
 main(int argc, char *argv[])
 {
 
-	progname = "atmos_precompute";
+    progname = "atmos_precompute";
     printf("precomputing...\n");
     precompute(1);
     return 1;
