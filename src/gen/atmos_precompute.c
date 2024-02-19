@@ -1,20 +1,32 @@
 #include "atmosphere.h"
 #include "data.h"
 #include "interp2d.h"
-#include "fvect.h"
+#include "rtmath.h"
+#include <math.h>
 #include <stdio.h>
 
 char *progname;
 
-const double EARTHRADIUS = 6360e3;
-const double ATMOSRADIUS = 6420e3;
-const double ATMOSHEIGHT = ATMOSRADIUS - EARTHRADIUS;
-const double ATMOSRADIUS_M = 6395e3;
+const double ER = 6360e3;       /* Eearth radius in meters */
+const double AR = 6420e3;       /* Atmosphere radius in meters */
+const double AH = AR - ER;      /* Atmosphere thickness in meters */
+const double HMAX = 875671;     /* Maximum atmosphere thickness in meters: sqrt(AR^2 - ER^2) */
+
+// const double AR_M = 6395e3;
+
 const unsigned int TRANSMITTANCE_W = 256;
 const unsigned int TRANSMITTANCE_H = 64;
 const float START_WVL = 380.0;
 const float END_WVL = 780.0;
 const unsigned int NSAMP = 20;
+const double SUNRAD = 0.004625;
+// The cosine of the maximum Sun zenith angle for which atmospheric scattering
+// must be precomputed (for maximum precision, use the smallest Sun zenith
+// angle yielding negligible sky light radiance values. For instance, for the
+// Earth case, 102 degrees is a good choice - yielding mu_s_min = -0.2).
+const double MU_S_MIN = -0.2;
+
+const double GROUND_ALBEDO = 0.2;
 
 // Scale heights (m)
 // Rayleigh scattering
@@ -92,54 +104,75 @@ const SCOLOR AM0_CA = {7.671e-06, 7.3e-06, 6.961e-06, 6.625e-06, 6.347e-06,
     4.8e-06, 4.685e-06, 4.538e-06, 4.386e-06, 4.279e-06, 4.218e-06, 4.159e-06, 4.104e-06};
 
 
+const double MIE_G = 0.76;
+
 const unsigned int RES_R = 32;
 const unsigned int RES_MU = 128;
 const unsigned int RES_MU_S = 32;
 const unsigned int RES_NU = 8;
 
-static void swap12(double *a, double *b)
-{
-    double tmp = *a;
-    *a = *b;
-    *b = tmp;
-}
+const unsigned int IRRADIANCE_TEXTURE_WIDTH = 64;
+const unsigned int IRRADIANCE_TEXTURE_HEIGHT = 16;
 
 
-static double linear_interp(double x, const double *xp, const double *fp, int size)
-{
-    if (x <= xp[0]) {
-        return fp[0];
-    } else if (x >= xp[size - 1]) {
-        return fp[size - 1];
-    } else {
-        int j = 0;
-        while (x > xp[j + 1] && j < size - 2) j++;
 
-        double slope = (fp[j + 1] - fp[j]) / (xp[j + 1] - xp[j]);
-        return fp[j] + slope * (x - xp[j]);
+typedef struct {
+    double width;
+    double exp_term;
+    double exp_scale;
+    double linear_term;
+    double constant_term;
+} DensityProfileLayer;
+
+
+typedef struct {
+    DensityProfileLayer layers[2];
+} DensityProfile;
+
+DensityProfile rayleigh_density = {
+    .layers = {
+        {
+            .width = 0.0,
+            .exp_term = 1.0,
+            .exp_scale = -1 / HR_MS,
+            .linear_term = 0.0,
+            .constant_term = 0.0
+        },
     }
+};
+
+DensityProfile mie_density = {
+    .layers = {
+        {
+            .width = 0.0,
+            .exp_term = 1.0,
+            .exp_scale = -1 / HMS_CC,
+            .linear_term = 0.0,
+            .constant_term = 0.0
+        },
+    }
+};
+
+
+static inline double dmin(double x, double y) {
+    return x < y ? x : y;
+}
+
+static inline double dmax(double x, double y) {
+    return x > y ? x : y;
 }
 
 
-static int hit_sphere(double *roots, const double r, const double ct, const double radius)
-{
-    float A = 1;
-    float B = -2 * r * ct;
-    float C = r * r - radius * radius;
-
-    if (!quadratic(roots, A, B, C))
-        return 0;
-
-    if (roots[0] > roots[1])
-        swap12(&roots[0], &roots[1]);
-
-    return 1;
+double smoothstep(double edge0, double edge1, double x) {
+    x = (x - edge0) / (edge1 - edge0);
+    x = x < 0.0 ? 0.0 : x > 1.0 ? 1.0 : x;
+    return x * x * (3.0 - 2.0 * x);
 }
 
- 
+
 double limit(double r, double mu) {
-  double d_out = -r * mu + sqrt(r * r * (mu * mu - 1.0) + (ATMOSRADIUS+1e3) * (ATMOSRADIUS+1e3));
-  double delta_sq = r * r * (mu * mu - 1.0) + EARTHRADIUS * EARTHRADIUS;
+  double d_out = -r * mu + sqrt(r * r * (mu * mu - 1.0) + (AR+1e3) * (AR+1e3));
+  double delta_sq = r * r * (mu * mu - 1.0) + ER * ER;
   if (delta_sq >= 0.0) {
     double d_in = -r * mu - sqrt(delta_sq);
     if (d_in >= 0.0) {
@@ -150,6 +183,47 @@ double limit(double r, double mu) {
 }
 
 
+double distance_to_space(double r, double mu) {
+    if (r > AR) {
+        return 0;
+    }
+    if (mu < -1.0 || mu > 1.0) {
+        return 0;
+    }
+    double descriminant = r * r * (mu * mu - 1.0) + AR * AR;
+    double distance = -r * mu + sqrt(descriminant);
+    return distance < 0.0 ? 0.0 : distance;
+}
+
+double distance_to_earth(double r, double mu) {
+    if (r < ER) {
+        return 0;
+    }
+    if (mu < -1.0 || mu > 1.0) {
+        return 0;
+    }
+    double descriminant = r * r * (mu * mu - 1.0) + ER * ER;
+    double distance = -r * mu - sqrt(descriminant);
+    return distance < 0.0 ? 0.0 : distance;
+}
+
+
+static int ray_intersects_ground(double r, double mu) {
+    return mu < 0.0 && r * r * (mu * mu - 1.0) + ER * ER >= 0.0;
+}
+
+
+double get_layer_density(DensityProfileLayer *layer, double altitude) {
+    double density = layer->exp_term * exp(layer->exp_scale * altitude) + layer->linear_term * altitude + layer->constant_term;
+    return density < 0.0 ? 0 : density > 1.0 ? 1 : density;
+}
+
+
+double get_profile_density(DensityProfile *profile, double altitude) {
+    return altitude < profile->layers[0].width ? get_layer_density(&(profile->layers[0]), altitude) : get_layer_density(&(profile->layers[1]), altitude);
+}
+
+
 static double compute_optical_depth(const double scale_height, const double radius, const double ctheta)
 {
     double seg = 0;
@@ -157,7 +231,7 @@ static double compute_optical_depth(const double scale_height, const double radi
     double roots[2] = {0, 0};
     unsigned int i;
 
-    // if (!hit_sphere(roots, radius, ctheta, ATMOSRADIUS) || roots[1] < 0)
+    // if (!hit_sphere(roots, radius, ctheta, AR) || roots[1] < 0)
     //     return 0;
     // const double tmax = roots[1];
     const double tmax = limit(radius, ctheta);
@@ -167,15 +241,15 @@ static double compute_optical_depth(const double scale_height, const double radi
     const double apprx_seglen = 200.;
     const unsigned int nsamp = (tmax / apprx_seglen) ? tmax / apprx_seglen : 2;
     const double seglen = tmax / nsamp;
-    double optical_depth = exp(-(radius - EARTHRADIUS) / scale_height);
+    double optical_depth = exp(-(radius - ER) / scale_height);
     for (i = 0; i < nsamp; ++i) {
         seg += seglen;
         const double _r = sqrt(radius * radius + seg * seg + 2 * radius * seg * ctheta);
-        const double hr = exp(-(_r - EARTHRADIUS) / scale_height);
+        const double hr = exp(-(_r - ER) / scale_height);
         result += (optical_depth + hr) * seglen * 0.5;
         optical_depth = hr;
     }
-    double ct_horizon = -sqrt(1.0 - (EARTHRADIUS / radius) * (EARTHRADIUS / radius));
+    double ct_horizon = -sqrt(1.0 - (ER / radius) * (ER / radius));
     return ctheta < ct_horizon ? 1e9 : result;
 }
 
@@ -215,7 +289,7 @@ write_transmittance_data(char *fname)
             /* x, y to radius and cos(theta) */
             float xr = (i + 0.5) / TRANSMITTANCE_W;
             float yr = (j + 0.5) / TRANSMITTANCE_H;
-            radi = EARTHRADIUS + yr * yr * ATMOSHEIGHT;
+            radi = ER + yr * yr * AH;
             ctheta = -0.15 + tan(1.5 * xr) / tan(1.5) * 1.15;
 
             // FILE *fp2 = fopen("tau.txt", "a");
@@ -231,15 +305,20 @@ write_transmittance_data(char *fname)
     fclose(fp);
 }
 
+double get_texture_coord_from_unit_range(double x, int texture_size) {
+  return 0.5 / texture_size + x * (1.0 - 1.0 / texture_size);
+}
 
-static
-int
-interpolate_transmittance(double *result, DATARRAY* dp, double radius, double ctheta)
+double get_unit_range_from_texture_coord(double u, int texture_size) {
+  return (u - 0.5 / texture_size) / (1.0 - 1.0 / texture_size);
+}
+
+static int interpolate_transmittance(DATARRAY* dp, double radius, double ctheta, double *result)
 {
     double x, y;
     double pt[3];
     int i;
-    pt[1] = sqrt((radius - EARTHRADIUS) / ATMOSHEIGHT) * TRANSMITTANCE_H;
+    pt[1] = sqrt((radius - ER) / AH) * TRANSMITTANCE_H;
     pt[0] = (atan((ctheta + 0.15) / 1.15 * tan(1.5)) / 1.5) * TRANSMITTANCE_W;
     for (i = 0; i < NSAMP; ++i) {
         pt[2] = i;
@@ -249,133 +328,209 @@ interpolate_transmittance(double *result, DATARRAY* dp, double radius, double ct
     return 1;
 }
 
+static void get_transmittance(DATARRAY *tau_dp, double r, double mu, double d, int ray_r_mu_intersects_ground, double *result) {
+    double r_d = sqrt(d * d + 2.0 * r * mu * d + r * r);
+    r_d = r_d > AR ? AR : r_d < ER ? ER : r_d;
+    double mu_d = (r * mu + d) / r_d;
+    mu_d = mu_d > 1.0 ? 1.0 : mu_d < -1.0 ? -1.0 : mu_d;
+    double result1[NSAMP];
+    double result2[NSAMP];
+    double v;
 
-static void set_layer(int layer, double* r, double* dmin, double* dmax, double* dminp, double* dmaxp) {
-    double u = (layer * layer) / ((RES_R - 1.0) * (RES_R - 1.0));
-    *r = sqrt(EARTHRADIUS * EARTHRADIUS + u * (ATMOSRADIUS * ATMOSRADIUS - EARTHRADIUS * EARTHRADIUS)) + (layer == 0 ? 0.01 : (layer == RES_R - 1 ? -0.001 : 0.0));
-    *dmin = ATMOSRADIUS - *r;
-    *dmax = sqrt((*r) * (*r) - EARTHRADIUS * EARTHRADIUS) + sqrt(ATMOSRADIUS * ATMOSRADIUS - EARTHRADIUS * EARTHRADIUS);
-    *dminp = *r - EARTHRADIUS;
-    *dmaxp = sqrt((*r) * (*r) - EARTHRADIUS * EARTHRADIUS);
+    if (ray_r_mu_intersects_ground) {
+        interpolate_transmittance(tau_dp, r_d, -mu_d, result1);
+        interpolate_transmittance(tau_dp, r, -mu, result2);
+    } else {
+        interpolate_transmittance(tau_dp, r, mu, result1);
+        interpolate_transmittance(tau_dp, r_d, mu_d, result2);
+    }
+    for (int i = 0; i < NSAMP; ++i) {
+        v = result1[i] / result2[i];
+        result[i] = v > 1 ? 1.0 : v;
+    }
 }
 
-
-void compute_inscatter1_integrand(DATARRAY *tau_dp, double radius, double ct_view, double ct_sun, double ct_view_sun, double xj, double *rayleigh, double *mie) {
-    double iradius = sqrt(radius * radius + xj * xj + 2 * radius * xj * ct_view);
-    double isun_theta = (ct_view_sun * xj + ct_sun * radius) / iradius;
-    iradius = iradius > EARTHRADIUS ? iradius : EARTHRADIUS;
-    if (isun_theta >= -sqrt(1.0 - EARTHRADIUS * EARTHRADIUS / (iradius * iradius))) {
-        double tau[NSAMP];
-        double taui[NSAMP];
-        interpolate_transmittance(tau, tau_dp, radius, ct_view);
-        interpolate_transmittance(taui, tau_dp, iradius, isun_theta);
-        for (int i = 0; i < NSAMP; ++i) {
-            double ti = tau[i] * taui[i];
-            rayleigh[i] = ti * exp(-(iradius - EARTHRADIUS) / HR_MS);
-            mie[i] = ti * exp(-(iradius - EARTHRADIUS) / HR_MS);
-        }
-    } else {
-        for (int i = 0; i < NSAMP; ++i) {
-            rayleigh[i] = 0;
-            mie[i] = 0;
-        }
+static void get_transmittance_to_sun(DATARRAY *tau_dp, double r, double mu_s, double *result) {
+    double sin_theta_h = ER / r;
+    double cos_theta_h = (1.0 - sin_theta_h * sin_theta_h);
+    cos_theta_h = cos_theta_h < 0.0 ? 0.0 : -sqrt(cos_theta_h);
+    double v[NSAMP];
+    interpolate_transmittance(tau_dp, r, mu_s, v);
+    double st = smoothstep(-sin_theta_h * SUNRAD, sin_theta_h * SUNRAD, mu_s - cos_theta_h);
+    for (int i = 0; i < NSAMP; ++i) {
+        result[i] = v[i] * st;
     }
 }
 
 
-void ComputeInscatter1(
-    const TransmittanceTexture& transmittance_sampler, Length r, Length dmin,
-    Length dmax, Length dminp, Length dmaxp, vec2 xy,
-    IrradianceSpectrum* rayleigh, IrradianceSpectrum* mie) {
-  Number mu, muS, nu;
-  Number x = xy.x - 0.5;
-  Number y = xy.y - 0.5;
-  if (y < RES_MU / 2.0) {
-    Length d = (1.0 - y / (RES_MU / 2.0 - 1.0)) * dmaxp;
-    d = min(max(dminp, d), dmaxp * 0.999);
-    *mu = (Rg * Rg - r * r - d * d) / (2.0 * r * d);
-    *mu = min(*mu, -sqrt(1.0 - (Rg / r) * (Rg / r)) - 0.001);
-  } else {
-    Length d = ((y - RES_MU / 2.0) / (RES_MU / 2.0 - 1.0)) * dmax;
-    d = min(max(dmin, d), dmax * 0.999);
-    *mu = (Rt * Rt - r * r - d * d) / (2.0 * r * d);
-  }
-  *muS = mod(x, RES_MU_S) / (RES_MU_S - 1.0);
-  // paper formula
-  // muS = -(0.6 + log(1.0 - muS * (1.0 -  exp(-3.6)))) / 3.0;
-  // better formula
-  *muS = tan((2.0 * *muS - 1.0 + 0.26) * 1.1 * rad) / tan(1.26 * 1.1 * rad);
-  *nu = -1.0 + floor(x / RES_MU_S) / (RES_NU - 1) * 2.0;
-
-  DimensionlessSpectrum ray_sum = DimensionlessSpectrum(0.0);
-  DimensionlessSpectrum mie_sum = DimensionlessSpectrum(0.0);
-  Length dx = Limit(r, mu) / INSCATTER_INTEGRAL_SAMPLES;
-  DimensionlessSpectrum rayi;
-  DimensionlessSpectrum miei;
-  ComputeInscatter1Integrand(
-      transmittance_sampler, r, mu, muS, nu, 0.0 * m, &rayi, &miei);
-  for (int i = 1; i <= INSCATTER_INTEGRAL_SAMPLES; ++i) {
-    Length xj = i * dx;
-    DimensionlessSpectrum rayj;
-    DimensionlessSpectrum miej;
-    ComputeInscatter1Integrand(
-        transmittance_sampler, r, mu, muS, nu, xj, &rayj, &miej);
-    ray_sum += (rayi + rayj);
-    mie_sum += (miei + miej);
-    rayi = rayj;
-    miei = miej;
-  }
-  *rayleigh = ray_sum * (dx / 2) * RayleighScattering() * SolarSpectrum();
-  *mie = mie_sum * (dx / 2) * MieScattering() * SolarSpectrum();
+void compute_single_scattering_integrand(DATARRAY *tau_dp, double r, double mu, double mu_s, double nu, double d, int ray_r_mu_intersects_ground, double *rayleigh, double *mie) {
+    double r_d = sqrt(d * d + 2.0 * r * mu * d + r * r);
+    r_d =  r_d > AR ? AR : r_d < ER ? ER : r_d;
+    double mu_s_d = (r * mu_s + d * nu) / r_d;
+    mu_s_d = mu_s_d > 1.0 ? 1.0 : mu_s_d < -1.0 ? -1.0 : mu_s_d;
+    // double transmittance[NSAMP];
+    double tau_r_mu[NSAMP];
+    double tau_sun[NSAMP];
+    get_transmittance(tau_dp, r, mu, d, ray_r_mu_intersects_ground, tau_r_mu);
+    get_transmittance_to_sun(tau_dp, r_d, mu_s_d, tau_sun);
+    double rayleigh_profile_density = get_profile_density(&rayleigh_density, r_d - ER);
+    double mie_profile_density = get_profile_density(&mie_density, r_d - ER);
+    double transmittance;
+    for (int i=0; i< NSAMP; ++i) {
+        transmittance = tau_r_mu[i] * tau_sun[i];
+        rayleigh[i] = transmittance * rayleigh_profile_density;
+        mie[i] = transmittance * mie_profile_density;
+    }
 }
 
-void compute_inscatter1(DATARRAY *tau_dp, double radius, double dmin, double dmax, double dminp, double dmaxp, double i, double j, double *rayleigh, double *mie) {
-    double tau[NSAMP];
 
-    double i = i - 0.5;
-    double j = j - 0.5;
-    if (j < RES_MU / 2.0) {
-        double d = (1.0 - j / (RES_MU / 2.0 - 1.0)) * dmaxp;
-        d = min(max(dminp, d), dmaxp * 0.999);
-        double ct_view = (EARTHRADIUS * EARTHRADIUS - radius * radius - d * d) / (2.0 * radius * d);
-        ct_view = min(ct_view, -sqrt(1.0 - (EARTHRADIUS / radius) * (EARTHRADIUS / radius)) - 0.001);
+double distance_to_nearst_atmosphere_boundary(double r, double mu, int ray_r_mu_intersects_ground) {
+    if (ray_r_mu_intersects_ground) {
+        return distance_to_earth(r, mu);
     } else {
-        double d = ((j - RES_MU / 2.0) / (RES_MU / 2.0 - 1.0)) * dmax;
-        d = min(max(dmin, d), dmax * 0.999);
-        double ct_view = (ATMOSRADIUS * ATMOSRADIUS - radius * radius - d * d) / (2.0 * radius * d);
+        return distance_to_space(r, mu);
     }
-    ct_sun = mod(i, RES_MU_S) / (RES_MU_S - 1.0);
-    ct_sun = tan((2.0 * muS - 1.0 + 0.26) * 1.1 ) / tan(1.26 * 1.1);
-    nu = -1.0 + floor(i / RES_MU_S) / (RES_NU - 1) * 2.0;
+}
 
-    double ray_sum = {0.0};
-    double mie_sum = {0.0};
-    double dx = limit(radius, ct_view) / INSCATTER_INTEGRAL_SAMPLES;
-    double *rayi;
-    double *miei;
-    compute_inscatter1_integrand(tau_dp, radius, ct_view, ct_sun, ct_view_sun, 0, rayi, miei)
-    for (int i=0; i<=INSCATTER_INTEGRAL_SAMPLES; ++i) {
-        double xj = i * dx;
-        double *rayj;
-        double *miej;
-        compute_inscatter1_integrand(tau_dp, radius, ct_view, ct_sun, ct_view_sun, xj, rayj, miej);
+
+void compute_single_scattering(DATARRAY *tau_dp, double r, double mu, double mu_s, double nu, int ray_r_mu_intersects_ground, double *rayleigh, double *mie) {
+    const int SAMPLE_COUNT = 50;
+    double dx = distance_to_nearst_atmosphere_boundary(r, mu, ray_r_mu_intersects_ground) / SAMPLE_COUNT;
+    double rayleigh_sum[NSAMP];
+    double mie_sum[NSAMP];
+    for (int i=0; i <= SAMPLE_COUNT; ++i) {
+        double d_i = i * dx;
+        double rayleigh_i[NSAMP];
+        double mie_i[NSAMP];
+        compute_single_scattering_integrand(tau_dp, r, mu, mu_s, nu, d_i, ray_r_mu_intersects_ground, rayleigh_i, mie_i);
+        double weight_i = (i == 0 || i == SAMPLE_COUNT) ? 0.5 : 1.0;
         for (int j=0; j<NSAMP; ++j) {
-            ray_sum[j] = rayi[j] + rayj[j];
-            mie_sum[j] = miei[j] + miej[j];
-            rayi[j] = rayj[j];
-            miei[j] = miej[j];
+            rayleigh_sum[j] += rayleigh_i[j] * weight_i;
+            mie_sum[j] += mie_i[j] * weight_i;
         }
     }
     for (int k=0; k<NSAMP; ++k) {
-        rayleigh[k] = ray_sum[k] * (dx / 2) * BR0_MS[k] * EXT_SOL[k];
-        mie[k] = mie_sum[k] * (dx / 2) * BM0_CC[k] * EXT_SOL[k];
+        rayleigh[k] = rayleigh_sum[k] * dx * EXTSOL[k] * BR0_MS[k];
+        mie[k] = mie_sum[k] * dx * EXTSOL[k] * BM0_CC[k];
     }
 }
 
 
-void write_inscatter1(const DATARRAY *tau_dp, char *rname, char *mname) {
-    FILE *rfp = fopen(rname, "w");
-    FILE *mfp = fopen(mname, "w");
+
+static void compute_direct_irradiance(DATARRAY *tau_dp, double r, double mu_s, double *result) {
+    double alpha_s = SUNRAD;
+    // Approximate the average of the cosine factor mu_s over the visible fraction of the sun disc
+    double average_cosine_factor = mu_s < -alpha_s ? 0.0 : (mu_s > alpha_s ? mu_s : ((mu_s + alpha_s) * (mu_s + alpha_s)) / (4.0 * alpha_s));
+    double transmittance[NSAMP];
+    interpolate_transmittance(tau_dp, r, mu_s, transmittance);
+    for (int i = 0; i < NSAMP; ++i) {
+        result[i] = EXTSOL[i] * transmittance[i] * average_cosine_factor;
+    }
+}
+
+
+
+double rayleigh_phase_function(double nu) {
+    double k = 3.0 / (16.0 * PI);
+    return k * (1.0 + nu * nu);
+}
+
+
+double mie_phase_function(double g, double nu) {
+    double k = 3.0 / (8.0 * PI) * (1.0 - g * g) / (2.0 + g * g);
+    return k * (1.0 + nu * nu) / pow(1.0 + g * g - 2.0 * g * nu, 1.5);
+}
+
+
+static void to_scattering_uvwz(double r, double mu, double mu_s, double nu, int ray_r_mu_intersects_ground, double *u, double *v, double *w, double *z) {
+    double rho = r * r - ER * ER;
+    rho = rho < 0.0 ? 0.0 : sqrt(rho);
+    double u_r = get_texture_coord_from_unit_range(rho / HMAX, RES_R);
+
+    double r_mu = r * mu;
+    double discriminant = r_mu * r_mu - r * r + ER * ER;
+
+    double u_mu;
+    if (ray_r_mu_intersects_ground) {
+        double d = -r_mu - sqrt(discriminant);
+        double d_min = r - ER;
+        double d_max = rho;
+        u_mu = 0.5 - 0.5 * get_texture_coord_from_unit_range(d_max == d_min ? 0.0 : (d - d_min) / (d_max - d_min), RES_MU / 2);
+    } else {
+        double d = -r_mu + sqrt(discriminant + HMAX * HMAX);
+        double d_min = AR - r;
+        double d_max = rho + HMAX;
+        u_mu = 0.5 + 0.5 * get_texture_coord_from_unit_range((d - d_min) / (d_max - d_min), RES_MU / 2);
+    }
+
+    double d = distance_to_space(ER, mu_s);
+    double d_min = AH;
+    double d_max = HMAX;
+    double a = (d - d_min) / (d_max - d_min);
+    double D = distance_to_space(ER, MU_S_MIN);
+    double A = (D - d_min) / (d_max - d_min);
+    double u_mu_s = get_texture_coord_from_unit_range(dmax(1.0 - a / A, 0.0), RES_MU_S);
+    double u_nu = (nu + 1.0) * 0.5;
+    *u = u_nu;
+    *v = u_mu_s;
+    *w = u_mu;
+    *z = u_r;
+}
+
+
+static void from_scattering_uvwz(double u, double v, double w, double z, double *r, double *mu, double *mu_s, double *nu, int *ray_r_mu_intersects_ground) {
+    double rho = HMAX * get_unit_range_from_texture_coord(w, RES_R);
+    *r = sqrt(rho * rho + ER * ER);
+
+    if (z < 0.5) {
+        // Distance to the ground for the ray (r,mu), and its minimum and maximum
+        // values over all mu - obtained for (r,-1) and (r,mu_horizon) - from which
+        // we can recover mu:
+        double d_min = *r - ER;
+        double d_max = rho;
+        double d = d_min + (d_max - d_min) * get_unit_range_from_texture_coord(1.0 - 2.0 * z, RES_MU / 2);
+        if (d == 0.0) {
+            *mu = -1.0;
+        } else {
+            *mu = -(rho * rho + d * d) / (2.0 * *r * d);
+            *mu = *mu < -1.0 ? -1.0 : *mu > 1.0 ? 1.0 : *mu;
+            *ray_r_mu_intersects_ground = 1;
+        }
+    } else {
+        // Distance to the top atmosphere boundary for the ray (r,mu), and its
+        // minimum and maximum values over all mu - obtained for (r,1) and
+        // (r,mu_horizon) - from which we can recover mu:
+        double d_min = AR - *r;
+        double d_max = rho + HMAX;
+        double d = d_min + (d_max - d_min) * get_unit_range_from_texture_coord(2.0 * z - 1.0, RES_MU / 2);
+        if (d == 0.0) {
+            *mu = 1.0;
+        } else {
+            *mu = -(HMAX * HMAX - rho * rho - d * d) / (2.0 * *r * d);
+            *mu = *mu < -1.0 ? -1.0 : *mu > 1.0 ? 1.0 : *mu;
+            *ray_r_mu_intersects_ground = 0;
+        }
+    }
+    double x_mu_s = get_unit_range_from_texture_coord(v, RES_MU_S);
+    double d_min = AH;
+    double d_max = HMAX;
+    double D = distance_to_space(ER, MU_S_MIN);
+    double A = (D - d_min) / (d_max - d_min);
+    double a = (A - x_mu_s * A) / (1.0 + x_mu_s * A);
+    double d = d_min + dmin(a, A) * (d_max - d_min);
+    if (d == 0.0) {
+        *mu_s = 1.0;
+    } else {
+        *mu_s = -(HMAX * HMAX - d * d) / (2.0 * ER * d);
+        *mu_s = *mu_s < -1.0 ? -1.0 : *mu_s > 1.0 ? 1.0 : *mu_s;
+    }
+    *nu = u * 2.0 - 1.0;
+}
+
+
+void write_single_scattering_data(DATARRAY *tau_dp, char *rpath, char *mpath) {
+    FILE *rfp = fopen(rpath, "w");
+    FILE *mfp = fopen(mpath, "w");
     fprintf(rfp, "5\n");
     fprintf(rfp, "0 %d %d\n", RES_R, RES_R);
     fprintf(rfp, "0 %d %d\n", RES_MU, RES_MU);
@@ -388,15 +543,16 @@ void write_inscatter1(const DATARRAY *tau_dp, char *rname, char *mname) {
     fprintf(mfp, "0 %d %d\n", RES_MU_S, RES_MU_S);
     fprintf(mfp, "0 %d %d\n", RES_NU, RES_NU);
     fprintf(mfp, "0 %d %d\n", NSAMP, NSAMP);
-    for (unsigned int k=0; k< RES_R; ++k) {
-        double radius, dmin, dmax, dminp, dmaxp;
-        set_layer(k, &radius, &dmin, &dmax, &dminp, &dmaxp);
+    for (unsigned int i=0; i< RES_R; ++i) {
         for (unsigned int j=0; j< RES_MU; ++j) {
-            for (unsigned int i=0; i < RES_MU_S; ++i) {
+            for (unsigned int k=0; k < RES_MU_S; ++k) {
                 for (unsigned int l=0; l < RES_NU; ++l) {
                     double rayleigh[NSAMP];
                     double mie[NSAMP];
-                    compute_inscatter1(tau_dp, radius, dmin, dmax, dminp, dmaxp, i+0.5, j+0.5, rayleigh, mie);
+                    double r, mu, mu_s, nu;
+                    int ray_r_mu_intersects_ground;
+                    from_scattering_uvwz(i+0.5, j+0.5, k+0.5, l+0.5, &r, &mu, &mu_s, &nu, &ray_r_mu_intersects_ground);
+                    compute_single_scattering(tau_dp, r, mu, mu_s, nu, ray_r_mu_intersects_ground, rayleigh, mie);
                     for (int m = 0; m < NSAMP; ++m) {
                         fprintf(rfp, "%f\n", rayleigh[m]);
                         fprintf(mfp, "%f\n", mie[m]);
@@ -408,23 +564,220 @@ void write_inscatter1(const DATARRAY *tau_dp, char *rname, char *mname) {
 }
 
 
+static void interpolate_scattering(DATARRAY *dp, double r, double mu, double mu_s, double nu, int ray_r_mu_intersects_ground, double *result) {
+    double u, v, w, z;
+    to_scattering_uvwz(r, mu, mu_s, nu, ray_r_mu_intersects_ground, &u, &v, &w, &z);
+    for (int i = 0; i < NSAMP; ++i) {
+        double pt[5] = {u, v, w, z, i};
+        result[i] = datavalue(dp, pt);
+    }
+}
+
+static void to_irradiance_uv(double r, double mu_s, double *u, double *v) {
+    double x_r = (r - ER) / AH;
+    double x_mu_s = mu_s * 0.5 + 0.5;
+    *u = get_texture_coord_from_unit_range(x_mu_s, IRRADIANCE_TEXTURE_WIDTH);
+    *v = get_texture_coord_from_unit_range(x_r, IRRADIANCE_TEXTURE_HEIGHT);
+}
+
+
+static void from_irradiance_uv(double u, double v, double *r, double *mu_s) {
+    double x_mu_s = get_unit_range_from_texture_coord(u, IRRADIANCE_TEXTURE_WIDTH);
+    double x_r = get_unit_range_from_texture_coord(v, IRRADIANCE_TEXTURE_HEIGHT);
+    *r = x_r * AH + ER;
+    *mu_s = x_mu_s * 2.0 - 1.0;
+    *mu_s = *mu_s < -1.0 ? -1.0 : *mu_s > 1.0 ? 1.0 : *mu_s;
+}
+
+
+
+static void get_irradiance(DATARRAY *dp, double r, double mu_s, double *result) {
+    double u, v;
+    to_irradiance_uv(r, mu_s, &u, &v);
+    double pt[2] = {u, v};
+    for (int i = 0; i < NSAMP; ++i) {
+        double pt[3] = {u, v, i};
+        result[i] = datavalue(dp, pt);
+    }
+}
+
+
+static void get_scattering(DATARRAY *scat1r, DATARRAY *scat1m, DATARRAY *scat, double r, double mu, double mu_s, double nu, int ray_r_mu_intersects_ground, int scattering_order, double *result) {
+    if (scattering_order == 1) {
+        double rayleigh[NSAMP];
+        double mie[NSAMP];
+        interpolate_scattering(scat1r, r, mu, mu_s, nu, ray_r_mu_intersects_ground, rayleigh);
+        interpolate_scattering(scat1m, r, mu, mu_s, nu, ray_r_mu_intersects_ground, mie);
+        double rayleigh_phase = rayleigh_phase_function(nu);
+        double mie_phase = mie_phase_function(MIE_G, nu);
+        for (int i = 0; i < NSAMP; ++i) {
+            result[i] = rayleigh[i] * rayleigh_phase + mie[i] * mie_phase;
+        }
+    } else {
+        interpolate_scattering(scat, r, mu, mu_s, nu, ray_r_mu_intersects_ground, result);
+    }
+}
+
+
+static void compute_scattering_density(DATARRAY *tau_dp, DATARRAY *scat1r, DATARRAY *scat1m, DATARRAY *scat, DATARRAY *irrad_dp, double r, double mu, double mu_s, double nu, int scattering_order, double *result) {
+    // Compute unit direction vectors for the zenith, the view direction omega and
+    // and the sun direction omega_s, such that the cosine of the view-zenith
+    // angle is mu, the cosine of the sun-zenith angle is mu_s, and the cosine of
+    // the view-sun angle is nu. The goal is to simplify computations below.
+    double zenith_direction[3] = {0.0, 0.0, 1.0};
+    double omega[3] = {sqrt(1.0 - mu * mu), 0.0, mu};
+    double sun_dir_x = omega[0] == 0.0 ? 0.0 : (nu - mu * mu_s) / omega[0];
+    double sun_dir_y = sqrt(dmax(1.0 - sun_dir_x * sun_dir_x - mu_s * mu_s, 0.0));
+    double omega_s[3] = {sun_dir_x, sun_dir_y, mu_s};
+    const int SAMPLE_COUNT = 16;
+    const double dphi = PI / SAMPLE_COUNT;
+    const double dtheta = PI / SAMPLE_COUNT;
+
+    // Nested loops for the integral over all the incident directions omega_i.
+    for (int l = 0; l < SAMPLE_COUNT; ++l) {
+        double theta = (l + 0.5) * dtheta;
+        double cos_theta = cos(theta);
+        double sin_theta = sin(theta);
+        int ray_r_theta_intersects_ground = ray_intersects_ground(r, cos_theta);
+
+        // The distance and transmittance to the ground only depend on theta, so we
+        // can compute them in the outer loop for efficiency.
+        double distance_to_ground = 0.0;
+        double transmittance_to_ground[NSAMP];
+        double ground_albedo;
+        if (ray_r_theta_intersects_ground) {
+            distance_to_ground = distance_to_earth(r, cos_theta);
+            get_transmittance(tau_dp, r, cos_theta, distance_to_ground, 1, transmittance_to_ground);
+            ground_albedo = GROUND_ALBEDO;
+        }
+
+        for (int m = 0; m < 2 * SAMPLE_COUNT; ++m) {
+            double phi = (m + 0.5) * dphi;
+            double omega_i[3] = {cos(phi) * sin_theta, sin(phi) * sin_theta, cos_theta};
+            double domega_i = dtheta * dphi * sin(theta);
+
+            // The radiance L_i arriving from direction omega_i after n-1 bounces is
+            // the sum of a term given by the precomputed scattering texture for the
+            // (n-1)-th order:
+            double nu1 = fdot(omega_s, omega_i);
+            double incident_radiance[NSAMP];
+            get_scattering(scat1r, scat1m, scat, r, omega_i[2], mu_s, nu1, ray_r_theta_intersects_ground, scattering_order - 1, incident_radiance);
+
+            // and of the contribution from the light paths with n-1 bounces and whose
+            // last bounce is on the ground. This contribution is the product of the
+            // transmittance to the ground, the ground albedo, the ground BRDF, and
+            // the irradiance received on the ground after n-2 bounces.
+            double ground_normal[3] = {zenith_direction[0] * r + omega_i[0] * distance_to_ground, zenith_direction[1] * r + omega_i[1] * distance_to_ground, zenith_direction[2] * r + omega_i[2] * distance_to_ground};
+            normalize(ground_normal);
+            double ground_irradiance[NSAMP];
+            get_irradiance(irrad_dp, ER, fdot(ground_normal, omega_s), ground_irradiance);
+            for (int i = 0; i < NSAMP; ++i) {
+                incident_radiance[i] += transmittance_to_ground[i] * ground_albedo * (1.0 / PI) * ground_irradiance[i];
+            }
+
+            // The radiance finally scattered from direction omega_i towards direction
+            // -omega is the product of the incident radiance, the scattering
+            // coefficient, and the phase function for directions omega and omega_i
+            // (all this summed over all particle types, i.e. Rayleigh and Mie).
+            double nu2 = fdot(omega, omega_i);
+            double rayleigh_density_ = get_profile_density(&rayleigh_density, r - ER);
+            double mie_density_ = get_profile_density(&mie_density, r - ER);
+            for (int j = 0; j < NSAMP; ++j) {
+                result[j] += incident_radiance[j] * (BR0_MS[j] * rayleigh_density_ * rayleigh_phase_function(nu2) + mie_density_ * mie_phase_function(MIE_G, nu2) * BM0_CC[j]) * domega_i;
+            }
+        }
+    }
+}
+
+
+static void write_direct_irradiance_data(DATARRAY *tau_dp, char *fname) {
+    FILE *fp = fopen(fname, "w");
+    fprintf(fp, "3\n");
+    fprintf(fp, "0 %d %d\n", IRRADIANCE_TEXTURE_WIDTH, IRRADIANCE_TEXTURE_WIDTH);
+    fprintf(fp, "0 %d %d\n", IRRADIANCE_TEXTURE_HEIGHT, IRRADIANCE_TEXTURE_HEIGHT);
+    fprintf(fp, "0 %d %d\n", NSAMP, NSAMP);
+    for (unsigned int j = 0; j < IRRADIANCE_TEXTURE_HEIGHT; ++j) {
+        for (unsigned int i = 0; i < IRRADIANCE_TEXTURE_WIDTH; ++i) {
+            double r, mu_s;
+            double result[NSAMP];
+            from_irradiance_uv(i + 0.5, j + 0.5, &r, &mu_s);
+            compute_direct_irradiance(tau_dp, r, mu_s, result);
+            for (int k = 0; k < NSAMP; ++k) {
+                fprintf(fp, "%f\n", result[k]);
+            }
+        }
+    }
+}
+
+static void write_initial_irradiance_data(char *fname) {
+    FILE *fp = fopen(fname, "w");
+    fprintf(fp, "3\n");
+    fprintf(fp, "0 %d %d\n", IRRADIANCE_TEXTURE_WIDTH, IRRADIANCE_TEXTURE_WIDTH);
+    fprintf(fp, "0 %d %d\n", IRRADIANCE_TEXTURE_HEIGHT, IRRADIANCE_TEXTURE_HEIGHT);
+    fprintf(fp, "0 %d %d\n", NSAMP, NSAMP);
+    for (unsigned int j = 0; j < IRRADIANCE_TEXTURE_HEIGHT; ++j) {
+        for (unsigned int i = 0; i < IRRADIANCE_TEXTURE_WIDTH; ++i) {
+            for (int k = 0; k < NSAMP; ++k) {
+                fprintf(fp, "%f\n", 0.0);
+            }
+        }
+    }
+}
+
+
+static void compute_indirect_irradiance(DATARRAY *scat1r, DATARRAY *scat1m, DATARRAY *scat, double r, double mu_s, int scattering_order, double *result) {
+    const int SAMPLE_COUNT = 32;
+    const double dphi = PI / SAMPLE_COUNT;
+    const double dtheta = PI / SAMPLE_COUNT;
+
+    double omega_s[3] = {sqrt(1.0 - mu_s * mu_s), 0.0, mu_s};
+    for (int j = 0; j < SAMPLE_COUNT / 2; ++j) {
+        double theta = (j + 0.5) * dtheta;
+        for (int i = 0; i < 2 * SAMPLE_COUNT; ++i) {
+            double phi = (i + 0.5) * dphi;
+            double omega[3] = {sin(theta) * cos(phi), sin(theta) * sin(phi), cos(theta)};
+            double domega = dtheta * dphi * sin(theta);
+            double nu = fdot(omega, omega_s);
+            for (int k = 0; k < NSAMP; ++k) {
+                result[k] += get_scattering(single_rayleigh_scattering_texture, single_mie_scattering_texture, multiple_scattering_texture, r, omega.z, mu_s, nu, false /* ray_r_theta_intersects_ground */, scattering_order) * omega.z * domega;
+            }
+        }
+    }
+}
+
+
 int
 precompute(int sorder)
 {
+    if (sorder < 2) {
+        printf("scattering order must be at least 2\n");
+        return 0;
+    }
     const int nsamp = TRANSMITTANCE_H * TRANSMITTANCE_W;
     float transmittance[nsamp];
-    DATARRAY *tau_dp;
-    DATARRAY *inscat1r_dp;
-    DATARRAY *inscat1m_dp;
 
+    char *tau_path = "tau.dat";
+
+    char *delta_irrad_path = "delta_irrad.dat";
+    char *irrad_path = "irrad.dat";
+
+    char *ins1r_path = "inscat1r.dat";
+    char *ins1m_path = "inscat1m.dat";
+
+    DATARRAY *tau_dp;
+    DATARRAY *delta_rayleigh_scattering_dp;
+    DATARRAY *delta_mie_scattering_dp;
+    DATARRAY *scattering_dp;
+    DATARRAY *delta_scattering_density_dp;
+    DATARRAY *delta_irradiance_dp;
+    DATARRAY *irradiance_dp;
 
     printf("setting interpolators...\n");
-    char *tname = "tau.dat";
-    if (getpath(tname, getrlibpath(), R_OK) == NULL) {
+    if (getpath(tau_path, getrlibpath(), R_OK) == NULL) {
         printf("writing transmittance data to file...\n");
-        write_transmittance_data(tname);
+        write_transmittance_data(tau_path);
     };
-    tau_dp = getdata(tname);
+    tau_dp = getdata(tau_path);
 
     // double r = 6360e3;
     // double ct = 0.5;
@@ -434,24 +787,96 @@ precompute(int sorder)
     //     printf("tau: %f\n", tau[i]);
     // }
     //
-    char *i1rname = "inscat1r.dat";
-    char *i1mname = "inscat1m.dat";
-    if (getpath(i1rname, getrlibpath(), R_OK) == NULL) {
-        printf("writing transmittance data to file...\n");
-        write_inscat1_data(i1rname);
+    // Compute the direct irradiance, store it in delta_irradiance_texture, and
+    // initialize irradiance_texture_ with zeros (we don't want the direct
+    // irradiance in irradiance_texture_, but only the irradiance from the sky).
+    printf("computing direct irradiance...\n");
+    if (getpath(irrad_path, getrlibpath(), R_OK) == NULL) {
+        printf("writing irradiance data to file...\n");
+        write_direct_irradiance_data(tau_dp, delta_irrad_path);
     };
-    tau_dp = getdata(tname);
-    
-    return 1;
+    delta_irradiance_dp = getdata(delta_irrad_path);
+    irradiance_dp = getdata(irrad_path);
+
+
+    // Compute the rayleigh and mie single scattering, and store them in
+    // delta_rayleigh_scattering_texture and delta_mie_scattering_texture, as well
+    // as in scattering_texture.
+    if (getpath(ins1r_path, getrlibpath(), R_OK) == NULL) {
+        printf("writing transmittance data to file...\n");
+        write_single_scattering_data(tau_dp, ins1r_path, ins1m_path);
+    };
+    delta_rayleigh_scattering_dp = getdata(ins1r_path);
+    delta_mie_scattering_dp = getdata(ins1m_path);
+    scattering_dp = getdata(ins1r_path);
+
+
+    // Compute the 2nd, 3rd and 4th order of scattering, in sequence.
+    for (unsigned int scattering_order = 2; scattering_order <= sorder; ++scattering_order) {
+        // Compute the scattering density, and store it in delta_scattering_density_texture.
+        for (unsigned int l = 0; l < RES_R; ++l) {
+            for (unsigned int k = 0; k < RES_MU; ++k) {
+                for (unsigned int j = 0; j < RES_MU_S; ++j) {
+                    for (unsigned int i = 0; i < RES_NU; ++i) {
+                        double scattering_density[NSAMP];
+                        scattering_density = ComputeScatteringDensityTexture(
+                                atmosphere_,
+                                *transmittance_texture_,
+                                *delta_rayleigh_scattering_texture,
+                                *delta_mie_scattering_texture,
+                                *delta_multiple_scattering_texture,
+                                *delta_irradiance_texture,
+                                vec3(i + 0.5, j + 0.5, k + 0.5),
+                                scattering_order);
+                        delta_scattering_density_dp->Set(i, j, k, scattering_density);
+                }
+            }
+        }
+
+        // Compute the indirect irradiance, store it in delta_irradiance_texture and accumulate it in irradiance_texture_.
+        for (unsigned int j = 0; j < IRRADIANCE_TEXTURE_HEIGHT; ++j) {
+            for (unsigned int i = 0; i < IRRADIANCE_TEXTURE_WIDTH; ++i) {
+                IrradianceSpectrum delta_irradiance;
+                delta_irradiance = ComputeIndirectIrradianceTexture(
+                        atmosphere_, *delta_rayleigh_scattering_texture,
+                        *delta_mie_scattering_texture, *delta_multiple_scattering_texture,
+                        vec2(i + 0.5, j + 0.5), scattering_order - 1);
+                delta_irradiance_texture->Set(i, j, delta_irradiance);
+            }
+        }
+        (*irradiance_texture_) += *delta_irradiance_texture;
+
+        // Compute the multiple scattering, store it in delta_multiple_scattering_texture, and accumulate it in scattering_texture_.
+        for (unsigned int k = 0; k < SCATTERING_TEXTURE_DEPTH; ++k) {
+            for (unsigned int j = 0; j < SCATTERING_TEXTURE_HEIGHT; ++j) {
+                for (unsigned int i = 0; i < SCATTERING_TEXTURE_WIDTH; ++i) {
+                    RadianceSpectrum delta_multiple_scattering;
+                    Number nu;
+                    delta_multiple_scattering = ComputeMultipleScatteringTexture(
+                            atmosphere_, *transmittance_texture_,
+                            *delta_scattering_density_texture,
+                            vec3(i + 0.5, j + 0.5, k + 0.5), nu);
+                    delta_multiple_scattering_texture->Set(i, j, k, delta_multiple_scattering);
+                    scattering_texture_->Set(i, j, k, scattering_texture_->Get(i, j, k) + delta_multiple_scattering * (1.0 / RayleighPhaseFunction(nu)));
+                }
+            }
+        }
+    }
+
+    transmittance_texture_->Save(cache_directory_ + "transmittance.dat");
+    scattering_texture_->Save(cache_directory_ + "scattering.dat");
+    single_mie_scattering_texture_->Save(cache_directory_ + "single_mie_scattering.dat");
+    irradiance_texture_->Save(cache_directory_ + "irradiance.dat");
 }
 
 
-int
-main(int argc, char *argv[])
+int main(int argc, char *argv[])
 {
-
     progname = "atmos_precompute";
     printf("precomputing...\n");
-    precompute(1);
-    return 1;
+    if (!precompute(2)) {
+        printf("precompute failed\n");
+        return 1;
+    }
+    return 0;
 }
