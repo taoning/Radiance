@@ -365,9 +365,9 @@ void
 get_transmittance(DATARRAY *tau_dp, double r, double mu, double d, int ray_r_mu_intersects_ground, double *result)
 {
     double r_d = sqrt(d * d + 2.0 * r * mu * d + r * r);
-    r_d = r_d > AR ? AR : r_d < ER ? ER : r_d;
+    r_d = fmax(ER, fmin(AR, r_d));
     double mu_d = (r * mu + d) / r_d;
-    mu_d = mu_d > 1.0 ? 1.0 : mu_d < -1.0 ? -1.0 : mu_d;
+    mu_d = fmax(-1.0, fmin(1.0, mu_d));
     double result1[NSSAMP];
     double result2[NSSAMP];
     double v;
@@ -415,9 +415,9 @@ compute_single_scattering_integrand(
         double *mie)
 {
     double r_d = sqrt(d * d + 2.0 * r * mu * d + r * r);
-    r_d =  r_d > AR ? AR : r_d < ER ? ER : r_d;
+    r_d = fmax(ER, fmin(AR, r_d));
     double mu_s_d = (r * mu_s + d * nu) / r_d;
-    mu_s_d = mu_s_d > 1.0 ? 1.0 : mu_s_d < -1.0 ? -1.0 : mu_s_d;
+    mu_s_d = fmax(-1.0, fmin(1.0, mu_s_d));
     // double transmittance[NSSAMP];
     double tau_r_mu[NSSAMP];
     double tau_sun[NSSAMP];
@@ -425,9 +425,8 @@ compute_single_scattering_integrand(
     get_transmittance_to_sun(tau_dp, r_d, mu_s_d, tau_sun);
     double rayleigh_profile_density = get_profile_density(&rayleigh_density, r_d - ER);
     double mie_profile_density = get_profile_density(&mie_density, r_d - ER);
-    double transmittance;
     for (int i=0; i< NSSAMP; ++i) {
-        transmittance = tau_r_mu[i] * tau_sun[i];
+        double transmittance = tau_r_mu[i] * tau_sun[i];
         rayleigh[i] = transmittance * rayleigh_profile_density;
         mie[i] = transmittance * mie_profile_density;
     }
@@ -450,8 +449,8 @@ compute_single_scattering(DATARRAY *tau_dp, double r, double mu, double mu_s, do
 {
     const int SAMPLE_COUNT = 50;
     double dx = distance_to_nearst_atmosphere_boundary(r, mu, ray_r_mu_intersects_ground) / SAMPLE_COUNT;
-    double rayleigh_sum[NSSAMP];
-    double mie_sum[NSSAMP];
+    double rayleigh_sum[NSSAMP] = {0};
+    double mie_sum[NSSAMP] = {0};
     for (int i=0; i <= SAMPLE_COUNT; ++i) {
         double d_i = i * dx;
         double rayleigh_i[NSSAMP];
@@ -734,11 +733,11 @@ compute_multiple_scattering(
         // The r, mu and mu_s parameters at the current integration point (see the
         // single scattering section for a detailed explanation).
         double r_i = sqrt(d_i * d_i + 2.0 * r * mu * d_i + r * r);
-        r_i = r_i > AR ? AR : r_i < ER ? ER : r_i;
+        r_i = fmax(ER, fmin(AR, r_i));
         double mu_i = (r * mu + d_i) / r_i;
-        mu_i = mu_i > 1.0 ? 1.0 : mu_i < -1.0 ? -1.0 : mu_i;
+        mu_i = fmax(-1.0, fmin(1.0, mu_i));
         double mu_s_i = (r * mu_s + d_i * nu) / r_i;
-        mu_s_i = mu_s_i > 1.0 ? 1.0 : mu_s_i < -1.0 ? -1.0 : mu_s_i;
+        mu_s_i = fmax(-1.0, fmin(1.0, mu_s_i));
 
         // The Rayleigh and Mie multiple scattering at the current sample point.
         double rayleigh_mie_i[NSSAMP];
@@ -835,48 +834,6 @@ compute_scattering_density(
             double mie_density_ = get_profile_density(&mie_density, r - ER);
             for (int j = 0; j < NSSAMP; ++j) {
                 result[j] += incident_radiance[j] * (BR0_MS[j] * rayleigh_density_ * rayleigh_phase_function(nu2) + mie_density_ * mie_phase_function(MIE_G, nu2) * BM0_CC[j]) * domega_i;
-            }
-        }
-    }
-}
-
-
-static
-void
-write_direct_irradiance_data(DATARRAY *tau_dp, char *fname)
-{
-    FILE *fp = fopen(fname, "w");
-    fprintf(fp, "3\n");
-    fprintf(fp, "0 %d %d\n", IRRADIANCE_W, IRRADIANCE_W);
-    fprintf(fp, "0 %d %d\n", IRRADIANCE_H, IRRADIANCE_H);
-    fprintf(fp, "0 %d %d\n", NSSAMP, NSSAMP);
-    for (unsigned int j = 0; j < IRRADIANCE_H; ++j) {
-        for (unsigned int i = 0; i < IRRADIANCE_W; ++i) {
-            double r, mu_s;
-            double result[NSSAMP];
-            from_irradiance_uv(i + 0.5, j + 0.5, &r, &mu_s);
-            compute_direct_irradiance(tau_dp, r, mu_s, result);
-            for (int k = 0; k < NSSAMP; ++k) {
-                fprintf(fp, "%f\n", result[k]);
-            }
-        }
-    }
-}
-
-
-static
-void
-write_initial_irradiance_data(char *fname)
-{
-    FILE *fp = fopen(fname, "w");
-    fprintf(fp, "3\n");
-    fprintf(fp, "0 %d %d\n", IRRADIANCE_W, IRRADIANCE_W);
-    fprintf(fp, "0 %d %d\n", IRRADIANCE_H, IRRADIANCE_H);
-    fprintf(fp, "0 %d %d\n", NSSAMP, NSSAMP);
-    for (unsigned int j = 0; j < IRRADIANCE_H; ++j) {
-        for (unsigned int i = 0; i < IRRADIANCE_W; ++i) {
-            for (int k = 0; k < NSSAMP; ++k) {
-                fprintf(fp, "%f\n", 0.0);
             }
         }
     }
@@ -1005,8 +962,12 @@ savedata(DATARRAY *dp)
     if (dp == NULL)
         return;
     FILE *fp = fopen(dp->name, "w");
+    if (fp == NULL) {
+        fprintf(stderr, "Error opening file %s\n", dp->name);
+        return;
+    }
     int i, j;
-    int nvals;
+    int nvals = 1;
     for (i = 0; i < dp->nd; i++) {
         nvals *= dp->dim[i].ne;
     }
@@ -1031,7 +992,7 @@ increment_dp(DATARRAY *dp1, DATARRAY *dp2)
         return;
 
     int i;
-    int nvals;
+    int nvals = 1;
     for (i = 0; i < dp1->nd; i++) {
         nvals *= dp1->dim[i].ne;
     }
@@ -1053,9 +1014,7 @@ precompute(int sorder)
     }
 
     const int nsamp = TRANSMITTANCE_H * TRANSMITTANCE_W;
-    float transmittance[nsamp];
     unsigned int idx, i, j, k, l, m;
-
 
     DATARRAY *tau_dp = allocate_3d_datarray("transmittance.dat", TRANSMITTANCE_W, TRANSMITTANCE_H, NSSAMP);
     DATARRAY *delta_irradiance_dp = allocate_3d_datarray("delta_irradiance.dat", IRRADIANCE_W, IRRADIANCE_H, NSSAMP);
@@ -1069,11 +1028,6 @@ precompute(int sorder)
 
 
     printf("computing transmittance...\n");
-    // if (getpath(tau_path, getrlibpath(), R_OK) == NULL) {
-    //     printf("writing transmittance data to file...\n");
-    //     write_transmittance_data(tau_path);
-    // };
-    // tau_dp = getdata(tau_path);
     double radi, ctheta;
     double tau[NSSAMP];
     for (j = 0; j < TRANSMITTANCE_H; ++j) {
@@ -1097,14 +1051,6 @@ precompute(int sorder)
         }
     }
 
-    // double r = 6360e3;
-    // double ct = 0.5;
-    // double tau[NSSAMP];
-    // interpolate_transmittance(tau, tau_dp, r, ct);
-    // for (int i = 0; i < NSSAMP; ++i) {
-    //     printf("tau: %f\n", tau[i]);
-    // }
-    //
     // Compute the direct irradiance, store it in delta_irradiance_texture, and
     // initialize irradiance_texture_ with zeros (we don't want the direct
     // irradiance in irradiance_texture_, but only the irradiance from the sky).
@@ -1127,13 +1073,6 @@ precompute(int sorder)
     // Compute the rayleigh and mie single scattering, and store them in
     // delta_rayleigh_scattering_texture and delta_mie_scattering_texture, as well
     // as in scattering_texture.
-    // if (getpath(ins1r_path, getrlibpath(), R_OK) == NULL) {
-    //     printf("writing transmittance data to file...\n");
-    //     write_single_scattering_data(tau_dp, ins1r_path, ins1m_path);
-    // };
-    // delta_rayleigh_scattering_dp = getdata(ins1r_path);
-    // delta_mie_scattering_dp = getdata(ins1m_path);
-    // scattering_dp = getdata(ins1r_path);
     printf("computing single scattering...\n");
     for (i=0; i < RES_R; ++i) {
         for (j=0; j < RES_MU; ++j) {
@@ -1163,10 +1102,11 @@ precompute(int sorder)
     // Compute the 2nd, 3rd and 4th order of scattering, in sequence.
     for (scattering_order = 2; scattering_order <= sorder; ++scattering_order) {
         // Compute the scattering density, and store it in delta_scattering_density_texture.
-        for (unsigned int l = 0; l < RES_R; ++l) {
-            for (unsigned int k = 0; k < RES_MU; ++k) {
-                for (unsigned int j = 0; j < RES_MU_S; ++j) {
-                    for (unsigned int i = 0; i < RES_NU; ++i) {
+        printf("computing scattering density...\n");
+        for (l = 0; l < RES_R; ++l) {
+            for (k = 0; k < RES_MU; ++k) {
+                for (j = 0; j < RES_MU_S; ++j) {
+                    for (i = 0; i < RES_NU; ++i) {
                         double scattering_density[NSSAMP];
                         compute_scattering_density(
                                 tau_dp,
@@ -1187,6 +1127,7 @@ precompute(int sorder)
         }
 
         // Compute the indirect irradiance, store it in delta_irradiance_texture and accumulate it in irradiance_texture_.
+        printf("computing indirect irradiance...\n");
         for (unsigned int j = 0; j < IRRADIANCE_H; ++j) {
             for (unsigned int i = 0; i < IRRADIANCE_W; ++i) {
                 double delta_irradiance[NSSAMP];
@@ -1206,6 +1147,7 @@ precompute(int sorder)
         increment_dp(irradiance_dp, delta_irradiance_dp);
 
         // Compute the multiple scattering, store it in delta_multiple_scattering_texture, and accumulate it in scattering_texture_.
+        printf("computing multiple scattering...\n");
         for (unsigned int l = 0; l < RES_R; ++l) {
             for (unsigned int k = 0; k < RES_MU; ++k) {
                 for (unsigned int j = 0; j < RES_MU_S; ++j) {
