@@ -135,10 +135,15 @@ const double MIE_G = 0.76;
 const int TRANSMITTANCE_TEXTURE_WIDTH = 256;
 const int TRANSMITTANCE_TEXTURE_HEIGHT = 64;
 
-const int SCATTERING_TEXTURE_R_SIZE = 32;
-const int SCATTERING_TEXTURE_MU_SIZE = 128;
-const int SCATTERING_TEXTURE_MU_S_SIZE = 32;
-const int SCATTERING_TEXTURE_NU_SIZE = 8;
+// const int SCATTERING_TEXTURE_R_SIZE = 32;
+// const int SCATTERING_TEXTURE_MU_SIZE = 128;
+// const int SCATTERING_TEXTURE_MU_S_SIZE = 32;
+// const int SCATTERING_TEXTURE_NU_SIZE = 8;
+
+const int SCATTERING_TEXTURE_R_SIZE = 16;
+const int SCATTERING_TEXTURE_MU_SIZE = 64;
+const int SCATTERING_TEXTURE_MU_S_SIZE = 16;
+const int SCATTERING_TEXTURE_NU_SIZE = 4;
 
 const int SCATTERING_TEXTURE_WIDTH =
     SCATTERING_TEXTURE_NU_SIZE * SCATTERING_TEXTURE_MU_S_SIZE;
@@ -270,12 +275,12 @@ static void compute_transmittance_to_space(const double r, const double mu,
   }
 }
 
-double get_texture_coord_from_unit_range(double x, int texture_size) {
-  return 0.5 / texture_size + x * (1.0 - 1.0 / texture_size);
+static double get_texture_coord_from_unit_range(const double x, const int texture_size) {
+  return 0.5 / (double)texture_size + x * (1.0 - 1.0 / (double)texture_size);
 }
 
-double get_unit_range_from_texture_coord(double u, int texture_size) {
-  return (u - 0.5 / texture_size) / (1.0 - 1.0 / texture_size);
+static double get_unit_range_from_texture_coord(const double u, const int texture_size) {
+  return (u - 0.5 / (double)texture_size) / (1.0 - 1.0 / (double)texture_size);
 }
 
 static void to_transmittance_uv(const double r, const double mu, double *u,
@@ -293,8 +298,11 @@ static void to_transmittance_uv(const double r, const double mu, double *u,
   double d_max = rho + HMAX;
   double x_mu = (d - d_min) / (d_max - d_min);
   double x_r = rho / HMAX;
-  *u = get_texture_coord_from_unit_range(x_mu, TRANSMITTANCE_TEXTURE_WIDTH);
-  *v = get_texture_coord_from_unit_range(x_r, TRANSMITTANCE_TEXTURE_HEIGHT);
+  *u = fmax(0.0, fmin(TRANSMITTANCE_TEXTURE_WIDTH, x_mu * TRANSMITTANCE_TEXTURE_WIDTH));
+  *v = fmax(0.0, fmin(TRANSMITTANCE_TEXTURE_HEIGHT, x_r * TRANSMITTANCE_TEXTURE_HEIGHT));
+  // *u = get_texture_coord_from_unit_range(x_mu, TRANSMITTANCE_TEXTURE_WIDTH);
+  // *v = get_texture_coord_from_unit_range(x_r, TRANSMITTANCE_TEXTURE_HEIGHT);
+  // assert(*u >= 0.0 && *u <= 1.0);
 }
 
 static void from_transmittance_uv(const double u, const double v, double *r,
@@ -328,7 +336,7 @@ static void get_transmittance_to_space(DATARRAY *dp, const double r,
   double u, v;
   to_transmittance_uv(r, mu, &u, &v);
   for (i = 0; i < NSSAMP; ++i) {
-    double pt[3] = {u, v, (double)i};
+    double pt[3] = {v, u, (double)i};
     result[i] = datavalue(dp, pt);
   }
 }
@@ -367,7 +375,9 @@ static void get_transmittance_to_sun(DATARRAY *tau_dp, const double r,
   get_transmittance_to_space(tau_dp, r, mu_s, v);
   double st = smoothstep(-sin_theta_h * SUNRAD, sin_theta_h * SUNRAD,
                          mu_s - cos_theta_h);
+  assert(st >= 0.0 && st <= 1.0);
   for (int i = 0; i < NSSAMP; ++i) {
+    assert(v[i] >= 0.0 && v[i] <= 1.0);
     result[i] = v[i] * st;
   }
 }
@@ -388,6 +398,8 @@ void compute_single_scattering_integrand(DATARRAY *tau_dp, const double r,
       get_profile_density(&rayleigh_density, r_d - ER);
   double mie_profile_density = get_profile_density(&mie_density, r_d - ER);
   for (int i = 0; i < NSSAMP; ++i) {
+    assert(tau_r_mu[i] >= 0.0 && tau_r_mu[i] <= 1.0);
+    assert(tau_sun[i] >= 0.0 && tau_sun[i] <= 1.0);
     double transmittance = tau_r_mu[i] * tau_sun[i];
     rayleigh[i] = transmittance * rayleigh_profile_density;
     mie[i] = transmittance * mie_profile_density;
@@ -436,28 +448,6 @@ void compute_single_scattering(DATARRAY *tau_dp, const double r,
   for (int i = 0; i < NSSAMP; ++i) {
     rayleigh[i] = rayleigh_sum[i] * dx * EXTSOL[i] * BR0_MS[i];
     mie[i] = mie_sum[i] * dx * EXTSOL[i] * BM0_CC[i];
-  }
-}
-
-static void compute_direct_irradiance(DATARRAY *tau_dp, double r, double mu_s,
-                                      double *result) {
-
-  assert(r >= ER && r <= AR);
-  assert(mu_s >= -1.0 && mu_s <= 1.0);
-  // Approximate the average of the cosine factor mu_s over the visible fraction
-  // of the sun disc
-  double average_cosine_factor;
-  if (mu_s < -SUNRAD) {
-    average_cosine_factor = 0.0;
-  } else if (mu_s > SUNRAD) {
-    average_cosine_factor = mu_s;
-  } else {
-    average_cosine_factor = (mu_s + SUNRAD) * (mu_s + SUNRAD) / (4.0 * SUNRAD);
-  }
-  double transmittance[NSSAMP] = {0};
-  get_transmittance_to_space(tau_dp, r, mu_s, transmittance);
-  for (int i = 0; i < NSSAMP; ++i) {
-    result[i] = EXTSOL[i] * transmittance[i] * average_cosine_factor;
   }
 }
 
@@ -512,10 +502,10 @@ static void to_scattering_uvwz(double r, double mu, double mu_s, double nu,
   double u_mu_s = get_texture_coord_from_unit_range(
       fmax(1.0 - a / A, 0.0) / (1.0 + a), SCATTERING_TEXTURE_MU_S_SIZE);
   double u_nu = (nu + 1.0) / 2;
-  *u = u_nu;
-  *v = u_mu_s;
-  *w = u_mu;
-  *z = u_r;
+  *u = fmax(0, fmin(u_nu * SCATTERING_TEXTURE_NU_SIZE, SCATTERING_TEXTURE_NU_SIZE));
+  *v = fmax(0, fmin(u_mu_s * SCATTERING_TEXTURE_MU_S_SIZE, SCATTERING_TEXTURE_MU_S_SIZE));
+  *w = fmax(0, fmin(u_mu * SCATTERING_TEXTURE_MU_SIZE, SCATTERING_TEXTURE_MU_SIZE));
+  *z = fmax(0, fmin(u_r * SCATTERING_TEXTURE_R_SIZE, SCATTERING_TEXTURE_R_SIZE));
 }
 
 static void from_scattering_uvwz(double x, double y, double z, double w,
@@ -578,41 +568,12 @@ static void interpolate_scattering(DATARRAY *dp, const double r,
   double u, v, w, z;
   to_scattering_uvwz(r, mu, mu_s, nu, ray_r_mu_intersects_ground, &u, &v, &w,
                      &z);
+  assert(u >= 0.0 && u <= SCATTERING_TEXTURE_NU_SIZE);
+  assert(v >= 0.0 && v <= SCATTERING_TEXTURE_MU_S_SIZE);
+  assert(w >= 0.0 && w <= SCATTERING_TEXTURE_MU_SIZE);
+  assert(z >= 0.0 && z <= SCATTERING_TEXTURE_R_SIZE);
   for (int i = 0; i < NSSAMP; ++i) {
-    double pt[5] = {u, v, w, z, i};
-    result[i] = datavalue(dp, pt);
-  }
-}
-
-static void to_irradiance_uv(const double r, const double mu_s, double *u,
-                             double *v) {
-  assert(r >= ER && r <= AR);
-  assert(mu_s >= -1.0 && mu_s <= 1.0);
-  double x_r = (r - ER) / AH;
-  double x_mu_s = mu_s * 0.5 + 0.5;
-  *u = get_texture_coord_from_unit_range(x_mu_s, IRRADIANCE_TEXTURE_WIDTH);
-  *v = get_texture_coord_from_unit_range(x_r, IRRADIANCE_TEXTURE_HEIGHT);
-}
-
-static void from_irradiance_uv(const double u, const double v, double *r,
-                               double *mu_s) {
-  assert(u >= 0.0 && u <= 1.0);
-  assert(v >= 0.0 && v <= 1.0);
-  double x_mu_s =
-      get_unit_range_from_texture_coord(u, IRRADIANCE_TEXTURE_WIDTH);
-  double x_r = get_unit_range_from_texture_coord(v, IRRADIANCE_TEXTURE_HEIGHT);
-  *r = x_r * AH + ER;
-  *mu_s = x_mu_s * 2.0 - 1.0;
-  *mu_s = *mu_s < -1.0 ? -1.0 : *mu_s > 1.0 ? 1.0 : *mu_s;
-}
-
-static void get_irradiance(DATARRAY *dp, const double r, const double mu_s,
-                           double *result) {
-  double u, v;
-  to_irradiance_uv(r, mu_s, &u, &v);
-  double pt[2] = {u, v};
-  for (int i = 0; i < NSSAMP; ++i) {
-    double pt[3] = {u, v, i};
+    double pt[5] = {z, w, v, u, i};
     result[i] = datavalue(dp, pt);
   }
 }
@@ -640,51 +601,37 @@ static void get_scattering(DATARRAY *scat1r, DATARRAY *scat1m, DATARRAY *scat,
   }
 }
 
-static void compute_multiple_scattering(DATARRAY *tau_dp,
-                                        DATARRAY *scattering_density_dp,
-                                        const double r, const double mu,
-                                        const double mu_s, const double nu,
-                                        const int ray_r_mu_intersects_ground,
-                                        double *result) {
-
+static void to_irradiance_uv(const double r, const double mu_s, double *u,
+                             double *v) {
   assert(r >= ER && r <= AR);
-  assert(mu >= -1.0 && mu <= 1.0);
   assert(mu_s >= -1.0 && mu_s <= 1.0);
-  assert(nu >= -1.0 && nu <= 1.0);
+  const double x_r = (r - ER) / AH;
+  const double x_mu_s = mu_s * 0.5 + 0.5;
+  *u = get_texture_coord_from_unit_range(x_mu_s, IRRADIANCE_TEXTURE_WIDTH);
+  *v = get_texture_coord_from_unit_range(x_r, IRRADIANCE_TEXTURE_HEIGHT);
+  *u *= IRRADIANCE_TEXTURE_WIDTH;
+  *v *= IRRADIANCE_TEXTURE_HEIGHT;
+}
 
-  // Number of intervals for the numerical integration.
-  const int SAMPLE_COUNT = 50;
-  // The integration step, i.e. the length of each integration interval.
-  double dx = distance_to_nearst_atmosphere_boundary(
-                  r, mu, ray_r_mu_intersects_ground) /
-              SAMPLE_COUNT;
-  // Integration loop.
-  for (int i = 0; i <= SAMPLE_COUNT; ++i) {
-    double d_i = i * dx;
+static void from_irradiance_uv(const double u, const double v, double *r,
+                               double *mu_s) {
+  assert(u >= 0.0 && u <= 1.0);
+  assert(v >= 0.0 && v <= 1.0);
+  double x_mu_s =
+      get_unit_range_from_texture_coord(u, IRRADIANCE_TEXTURE_WIDTH);
+  double x_r = get_unit_range_from_texture_coord(v, IRRADIANCE_TEXTURE_HEIGHT);
+  *r = x_r * AH + ER;
+  *mu_s = clamp_cosine(x_mu_s * 2.0 - 1.0);
+}
 
-    // The r, mu and mu_s parameters at the current integration point (see the
-    // single scattering section for a detailed explanation).
-    double r_i = sqrt(d_i * d_i + 2.0 * r * mu * d_i + r * r);
-    r_i = fmax(ER, fmin(AR, r_i));
-    double mu_i = (r * mu + d_i) / r_i;
-    mu_i = fmax(-1.0, fmin(1.0, mu_i));
-    double mu_s_i = (r * mu_s + d_i * nu) / r_i;
-    mu_s_i = fmax(-1.0, fmin(1.0, mu_s_i));
-
-    // The Rayleigh and Mie multiple scattering at the current sample point.
-    double rayleigh_mie_i[NSSAMP] = {0};
-    double rayleigh_mie_s[NSSAMP] = {0};
-    double transmittance[NSSAMP] = {0};
-    interpolate_scattering(scattering_density_dp, r_i, mu_i, mu_s_i, nu,
-                           ray_r_mu_intersects_ground, rayleigh_mie_s);
-    get_transmittance(tau_dp, r, mu, d_i, ray_r_mu_intersects_ground,
-                      transmittance);
-    for (int j = 0; j < NSSAMP; ++j)
-      rayleigh_mie_i[j] = rayleigh_mie_s[j] * transmittance[j] * dx;
-    // Sample weight (from the trapezoidal rule).
-    double weight_i = (i == 0 || i == SAMPLE_COUNT) ? 0.5 : 1.0;
-    for (int j = 0; j < NSSAMP; ++j)
-      result[j] += rayleigh_mie_i[j] * weight_i;
+static void get_irradiance(DATARRAY *dp, const double r, const double mu_s,
+                           double *result) {
+  double u, v;
+  to_irradiance_uv(r, mu_s, &u, &v);
+  double pt[2] = {u, v};
+  for (int i = 0; i < NSSAMP; ++i) {
+    double pt[3] = {v, u, i};
+    result[i] = datavalue(dp, pt);
   }
 }
 
@@ -703,15 +650,14 @@ compute_scattering_density(DATARRAY *tau_dp, DATARRAY *scat1r, DATARRAY *scat1m,
   // angle is mu, the cosine of the sun-zenith angle is mu_s, and the cosine of
   // the view-sun angle is nu. The goal is to simplify computations below.
   const double epsilon = 1e-6;
-  const double zenith_direction[3] = {0.0, 0.0, 1.0};
-  double omega_x = 1.0 - mu * mu;
-  if (fabs(omega_x) < epsilon)
-    omega_x = 0.0;
-  const double omega[3] = {sqrt(omega_x), 0.0, mu};
-  const double sun_dir_x = omega[0] == 0.0 ? 0.0 : (nu - mu * mu_s) / omega[0];
+  const FVECT zenith_direction = {0.0, 0.0, 1.0};
+  double omega_0 = 1.0 - mu * mu;
+  omega_0 = fabs(omega_0) <= epsilon ? 0.0 : sqrt(omega_0);
+  const FVECT omega = {omega_0, 0.0, mu};
+  const double sun_dir_x = fabs(omega[0]) < epsilon ? 0.0 : (nu - mu * mu_s) / omega[0];
   const double sun_dir_y =
       sqrt(fmax(1.0 - sun_dir_x * sun_dir_x - mu_s * mu_s, 0.0));
-  const double omega_s[3] = {sun_dir_x, sun_dir_y, mu_s};
+  const FVECT omega_s = {sun_dir_x, sun_dir_y, mu_s};
 
   const int SAMPLE_COUNT = 16;
   const double dphi = PI / SAMPLE_COUNT;
@@ -731,6 +677,7 @@ compute_scattering_density(DATARRAY *tau_dp, DATARRAY *scat1r, DATARRAY *scat1m,
     double ground_albedo = 0;
     if (ray_r_theta_intersects_ground) {
       distance_to_ground = distance_to_earth(r, cos_theta);
+      assert(distance_to_ground >= 0.0 && distance_to_ground <= HMAX);
       get_transmittance(tau_dp, r, cos_theta, distance_to_ground, 1,
                         transmittance_to_ground);
       ground_albedo = GROUND_ALBEDO;
@@ -738,16 +685,19 @@ compute_scattering_density(DATARRAY *tau_dp, DATARRAY *scat1r, DATARRAY *scat1m,
 
     for (int m = 0; m < 2 * SAMPLE_COUNT; ++m) {
       const double phi = (m + 0.5) * dphi;
-      const double omega_i[3] = {cos(phi) * sin_theta, sin(phi) * sin_theta,
-                                 cos_theta};
+      const FVECT omega_i = {cos(phi) * sin_theta, sin(phi) * sin_theta,
+                             cos_theta};
       const double domega_i = dtheta * dphi * sin(theta);
 
       // The radiance L_i arriving from direction omega_i after n-1 bounces is
       // the sum of a term given by the precomputed scattering texture for the
       // (n-1)-th order:
       double nu1 = fdot(omega_s, omega_i);
-      nu1 = fmax(-1.0, fmin(1.0, nu1));
-      // omega_s[1], omega_s[2], omega_i[0], omega_i[1], omega_i[2], nu1);
+      if (nu1 <= -1.0) {
+        nu1 += 0.1;
+      } else if (nu1 >= 1.0) {
+        nu1 -= 0.1;
+      }
       double incident_radiance[NSSAMP] = {0};
       get_scattering(scat1r, scat1m, scat, r, omega_i[2], mu_s, nu1,
                      ray_r_theta_intersects_ground, scattering_order - 1,
@@ -757,16 +707,18 @@ compute_scattering_density(DATARRAY *tau_dp, DATARRAY *scat1r, DATARRAY *scat1m,
       // last bounce is on the ground. This contribution is the product of the
       // transmittance to the ground, the ground albedo, the ground BRDF, and
       // the irradiance received on the ground after n-2 bounces.
-      double ground_normal[3] = {
+      FVECT ground_normal = {
           zenith_direction[0] * r + omega_i[0] * distance_to_ground,
           zenith_direction[1] * r + omega_i[1] * distance_to_ground,
           zenith_direction[2] * r + omega_i[2] * distance_to_ground};
       normalize(ground_normal);
       double ground_irradiance[NSSAMP] = {0};
-      double mu_s_ground = fdot(ground_normal, omega_s);
-      mu_s_ground = fmax(-1.0, fmin(1.0, mu_s_ground));
-      get_irradiance(irrad_dp, ER, mu_s_ground, ground_irradiance);
+      get_irradiance(irrad_dp, ER, fdot(ground_normal, omega_s),
+                     ground_irradiance);
       for (int i = 0; i < NSSAMP; ++i) {
+        assert(ground_irradiance[i] >= 0.0);
+        assert(transmittance_to_ground[i] >= 0.0 && transmittance_to_ground[i] <= 1.0);
+        assert(incident_radiance[i] >= 0.0);
         incident_radiance[i] += transmittance_to_ground[i] * ground_albedo *
                                 (1.0 / PI) * ground_irradiance[i];
       }
@@ -778,14 +730,81 @@ compute_scattering_density(DATARRAY *tau_dp, DATARRAY *scat1r, DATARRAY *scat1m,
       double nu2 = fdot(omega, omega_i);
       double rayleigh_density_ = get_profile_density(&rayleigh_density, r - ER);
       double mie_density_ = get_profile_density(&mie_density, r - ER);
+      double rayleigh_phase = rayleigh_phase_function(nu2);
+      double mie_phase = mie_phase_function(MIE_G, nu2);
       for (int j = 0; j < NSSAMP; ++j) {
-        result[j] +=
-            incident_radiance[j] *
-            (BR0_MS[j] * rayleigh_density_ * rayleigh_phase_function(nu2) +
-             mie_density_ * mie_phase_function(MIE_G, nu2) * BM0_CC[j]) *
-            domega_i;
+        result[j] += incident_radiance[j] *
+                     (BR0_MS[j] * rayleigh_density_ * rayleigh_phase +
+                      mie_density_ * mie_phase * BM0_CC[j]) *
+                     domega_i;
       }
     }
+  }
+}
+
+static void compute_multiple_scattering(DATARRAY *tau_dp,
+                                        DATARRAY *scattering_density_dp,
+                                        const double r, const double mu,
+                                        const double mu_s, const double nu,
+                                        const int ray_r_mu_intersects_ground,
+                                        double *result) {
+
+  assert(r >= ER && r <= AR);
+  assert(mu >= -1.0 && mu <= 1.0);
+  assert(mu_s >= -1.0 && mu_s <= 1.0);
+  assert(nu >= -1.0 && nu <= 1.0);
+
+  // Number of intervals for the numerical integration.
+  const int SAMPLE_COUNT = 50;
+  // The integration step, i.e. the length of each integration interval.
+  const double dx = distance_to_nearst_atmosphere_boundary( r, mu, ray_r_mu_intersects_ground) / (double)SAMPLE_COUNT;
+  assert(dx >= 0.0);
+  // Integration loop.
+  for (int i = 0; i <= SAMPLE_COUNT; ++i) {
+    const double d_i = i * dx;
+
+    // The r, mu and mu_s parameters at the current integration point (see the
+    // single scattering section for a detailed explanation).
+    const double r_i =
+        clamp_radius(sqrt(d_i * d_i + 2.0 * r * mu * d_i + r * r));
+    const double mu_i = clamp_cosine((r * mu + d_i) / r_i);
+    const double mu_s_i = clamp_cosine((r * mu_s + d_i * nu) / r_i);
+
+    // The Rayleigh and Mie multiple scattering at the current sample point.
+    double rayleigh_mie_s[NSSAMP] = {0};
+    double transmittance[NSSAMP] = {0};
+    interpolate_scattering(scattering_density_dp, r_i, mu_i, mu_s_i, nu,
+                           ray_r_mu_intersects_ground, rayleigh_mie_s);
+    get_transmittance(tau_dp, r, mu, d_i, ray_r_mu_intersects_ground,
+                      transmittance);
+    // Sample weight (from the trapezoidal rule).
+    double weight_i = (i == 0 || i == SAMPLE_COUNT) ? 0.5 : 1.0;
+    for (int j = 0; j < NSSAMP; ++j) {
+      assert(transmittance[j] >= 0.0 && transmittance[j] <= 1.0);
+      assert(rayleigh_mie_s[j] >= 0.0);
+      result[j] += rayleigh_mie_s[j] * transmittance[j] * dx * weight_i;
+    }
+  }
+}
+
+static void compute_direct_irradiance(DATARRAY *tau_dp, const double r, const double mu_s,
+                                      double *result) {
+
+  assert(r >= ER && r <= AR);
+  assert(mu_s >= -1.0 && mu_s <= 1.0);
+  // Approximate the average of the cosine factor mu_s over the visible fraction
+  // of the sun disc
+  const double average_cosine_factor =
+      mu_s < -SUNRAD
+          ? 0.0
+          : (mu_s > SUNRAD
+                 ? mu_s
+                 : (mu_s + SUNRAD) * (mu_s + SUNRAD) / (4.0 * SUNRAD));
+
+  double transmittance[NSSAMP] = {0};
+  get_transmittance_to_space(tau_dp, r, mu_s, transmittance);
+  for (int i = 0; i < NSSAMP; ++i) {
+    result[i] = EXTSOL[i] * transmittance[i] * average_cosine_factor;
   }
 }
 
@@ -802,18 +821,17 @@ static void compute_indirect_irradiance(DATARRAY *scat1r, DATARRAY *scat1m,
   const double dphi = PI / SAMPLE_COUNT;
   const double dtheta = PI / SAMPLE_COUNT;
 
-  double omega_s[3] = {sqrt(1.0 - mu_s * mu_s), 0.0, mu_s};
+  const FVECT omega_s = {sqrt(1.0 - mu_s * mu_s), 0.0, mu_s};
   for (int j = 0; j < SAMPLE_COUNT / 2; ++j) {
-    double theta = (j + 0.5) * dtheta;
+    const double theta = (j + 0.5) * dtheta;
     for (int i = 0; i < 2 * SAMPLE_COUNT; ++i) {
-      double phi = (i + 0.5) * dphi;
-      double omega[3] = {sin(theta) * cos(phi), sin(theta) * sin(phi),
-                         cos(theta)};
-      double domega = dtheta * dphi * sin(theta);
-      double nu = fdot(omega, omega_s);
-      double result1[NSSAMP];
-      get_scattering(scat1r, scat1m, scat, r, omega[2], mu_s, nu,
-                     0, /* ray_r_theta_intersects_ground */
+      const double phi = (i + 0.5) * dphi;
+      const FVECT omega = {sin(theta) * cos(phi), sin(theta) * sin(phi),
+                           cos(theta)};
+      const double domega = dtheta * dphi * sin(theta);
+      const double nu = fdot(omega, omega_s);
+      double result1[NSSAMP] = {0};
+      get_scattering(scat1r, scat1m, scat, r, omega[2], mu_s, nu, 0,
                      scattering_order, result1);
       for (int k = 0; k < NSSAMP; ++k) {
         result[k] += result1[k] * omega[2] * domega;
@@ -921,17 +939,21 @@ void savedata(DATARRAY *dp) {
 
 void increment_dp(DATARRAY *dp1, DATARRAY *dp2) {
   if (dp1 == NULL || dp2 == NULL)
-    return;
+    perror("null pointer in increment_dp\n");
 
   if (dp1->nd != dp2->nd)
-    return;
+    perror("dimension mismatch in increment_dp\n");
 
   int i;
-  int nvals = 1;
+  int nvals1 = 1;
+  int nvals2 = 1;
   for (i = 0; i < dp1->nd; i++) {
-    nvals *= dp1->dim[i].ne;
+    nvals1 *= dp1->dim[i].ne;
+    nvals2 *= dp2->dim[i].ne;
   }
-  for (i = 0; i < nvals; i++) {
+  if (nvals1 != nvals2)
+    perror("size mismatch in increment_dp\n");
+  for (i = 0; i < nvals1; i++) {
     dp1->arr.d[i] += dp2->arr.d[i];
   }
 }
@@ -985,6 +1007,7 @@ static int precompute(const int sorder) {
       from_transmittance_uv(xr, yr, &r, &mu);
       compute_transmittance_to_space(r, mu, tau);
       for (int k = 0; k < NSSAMP; ++k) {
+        assert(tau[k] >= 0.0 && tau[k] <= 1.0);
         tau_dp->arr.d[idx] = tau[k];
         idx += 1;
       }
@@ -1002,12 +1025,13 @@ static int precompute(const int sorder) {
   for (int j = 0; j < IRRADIANCE_TEXTURE_HEIGHT; ++j) {
     for (int i = 0; i < IRRADIANCE_TEXTURE_WIDTH; ++i) {
       double r, mu_s;
-      double result[NSSAMP];
+      double result[NSSAMP] = {0};
       double xr = (i + 0.5) / IRRADIANCE_TEXTURE_WIDTH;
       double yr = (j + 0.5) / IRRADIANCE_TEXTURE_HEIGHT;
       from_irradiance_uv(xr, yr, &r, &mu_s);
       compute_direct_irradiance(tau_dp, r, mu_s, result);
       for (int k = 0; k < NSSAMP; ++k) {
+        assert(result[k] >= 0.0);
         delta_irradiance_dp->arr.d[idx] = result[k];
         irradiance_dp->arr.d[idx] = 0.0;
         idx += 1;
@@ -1035,9 +1059,12 @@ static int precompute(const int sorder) {
           double wr = (l + 0.5) / SCATTERING_TEXTURE_R_SIZE;
           from_scattering_uvwz(xr, yr, zr, wr, &r, &mu, &mu_s, &nu,
                                &ray_r_mu_intersects_ground);
+          nu = fmax(mu * mu_s - sqrt((1.0 - mu * mu) * (1.0 - mu_s * mu_s)), fmin(mu * mu_s + sqrt((1.0 - mu * mu) * (1.0 - mu_s * mu_s)), nu));
           compute_single_scattering(tau_dp, r, mu, mu_s, nu,
                                     ray_r_mu_intersects_ground, rayleigh, mie);
           for (int m = 0; m < NSSAMP; ++m) {
+            assert(rayleigh[m] >= 0.0);
+            assert(mie[m] >= 0.0);
             delta_rayleigh_scattering_dp->arr.d[idx] = rayleigh[m];
             delta_mie_scattering_dp->arr.d[idx] = mie[m];
             scattering_dp->arr.d[idx] = rayleigh[m];
@@ -1047,10 +1074,8 @@ static int precompute(const int sorder) {
       }
     }
   }
-  assert(idx == SCATTERING_TEXTURE_R_SIZE * SCATTERING_TEXTURE_MU_SIZE *
-                    SCATTERING_TEXTURE_MU_S_SIZE * SCATTERING_TEXTURE_NU_SIZE *
-                    NSSAMP);
   savedata(delta_mie_scattering_dp);
+  savedata(delta_rayleigh_scattering_dp);
 
   // Compute the 2nd, 3rd and 4th order of scattering, in sequence.
   for (scattering_order = 2; scattering_order <= sorder; ++scattering_order) {
@@ -1062,7 +1087,7 @@ static int precompute(const int sorder) {
       for (unsigned int k = 0; k < SCATTERING_TEXTURE_MU_SIZE; ++k) {
         for (unsigned int j = 0; j < SCATTERING_TEXTURE_MU_S_SIZE; ++j) {
           for (unsigned int i = 0; i < SCATTERING_TEXTURE_NU_SIZE; ++i) {
-            double scattering_density[NSSAMP];
+            double scattering_density[NSSAMP] = {0};
             double r, mu, mu_s, nu;
             int ray_r_mu_intersects_ground;
             double xr = (i + 0.5) / SCATTERING_TEXTURE_NU_SIZE;
@@ -1071,11 +1096,13 @@ static int precompute(const int sorder) {
             double wr = (l + 0.5) / SCATTERING_TEXTURE_R_SIZE;
             from_scattering_uvwz(xr, yr, zr, wr, &r, &mu, &mu_s, &nu,
                                  &ray_r_mu_intersects_ground);
+            nu = fmax(mu * mu_s - sqrt((1.0 - mu * mu) * (1.0 - mu_s * mu_s)), fmin(mu * mu_s + sqrt((1.0 - mu * mu) * (1.0 - mu_s * mu_s)), nu));
             compute_scattering_density(
                 tau_dp, delta_rayleigh_scattering_dp, delta_mie_scattering_dp,
                 delta_multiple_scattering_dp, delta_irradiance_dp, r, mu, mu_s,
                 nu, scattering_order, scattering_density);
             for (int m = 0; m < NSSAMP; ++m) {
+              assert(scattering_density[m] >= 0.0);
               delta_scattering_density_dp->arr.d[idx] = scattering_density[m];
               idx += 1;
             }
@@ -1090,7 +1117,7 @@ static int precompute(const int sorder) {
     idx = 0;
     for (unsigned int j = 0; j < IRRADIANCE_TEXTURE_HEIGHT; ++j) {
       for (unsigned int i = 0; i < IRRADIANCE_TEXTURE_WIDTH; ++i) {
-        double delta_irradiance[NSSAMP];
+        double delta_irradiance[NSSAMP] = {0};
         double r, mu_s;
         double xr = (i + 0.5) / IRRADIANCE_TEXTURE_WIDTH;
         double yr = (j + 0.5) / IRRADIANCE_TEXTURE_HEIGHT;
@@ -1100,11 +1127,13 @@ static int precompute(const int sorder) {
                                     delta_multiple_scattering_dp, r, mu_s,
                                     scattering_order - 1, delta_irradiance);
         for (int k = 0; k < NSSAMP; ++k) {
+          assert(delta_irradiance[k] >= 0.0);
           delta_irradiance_dp->arr.d[idx] = delta_irradiance[k];
           idx += 1;
         }
       }
     }
+    savedata(delta_irradiance_dp);
 
     increment_dp(irradiance_dp, delta_irradiance_dp);
 
@@ -1117,7 +1146,7 @@ static int precompute(const int sorder) {
       for (unsigned int k = 0; k < SCATTERING_TEXTURE_MU_SIZE; ++k) {
         for (unsigned int j = 0; j < SCATTERING_TEXTURE_MU_S_SIZE; ++j) {
           for (unsigned int i = 0; i < SCATTERING_TEXTURE_NU_SIZE; ++i) {
-            double delta_multiple_scattering[NSSAMP];
+            double delta_multiple_scattering[NSSAMP] = {0};
             double r, mu, mu_s, nu;
             int ray_r_mu_intersects_ground;
             double xr = (i + 0.5) / SCATTERING_TEXTURE_NU_SIZE;
@@ -1126,11 +1155,13 @@ static int precompute(const int sorder) {
             double wr = (l + 0.5) / SCATTERING_TEXTURE_R_SIZE;
             from_scattering_uvwz(xr, yr, zr, wr, &r, &mu, &mu_s, &nu,
                                  &ray_r_mu_intersects_ground);
+            nu = fmax(mu * mu_s - sqrt((1.0 - mu * mu) * (1.0 - mu_s * mu_s)), fmin(mu * mu_s + sqrt((1.0 - mu * mu) * (1.0 - mu_s * mu_s)), nu));
             compute_multiple_scattering(
                 tau_dp, delta_scattering_density_dp, r, mu, mu_s, nu,
                 ray_r_mu_intersects_ground, delta_multiple_scattering);
             double rayleigh_phase = rayleigh_phase_function(nu);
             for (int m = 0; m < NSSAMP; ++m) {
+              assert(delta_multiple_scattering[m] >= 0.0);
               delta_multiple_scattering_dp->arr.d[idx] =
                   delta_multiple_scattering[m];
               scattering_dp->arr.d[idx] +=
@@ -1157,6 +1188,7 @@ static int precompute(const int sorder) {
   freedata(irradiance_dp);
   return 1;
 }
+
 static void get_combined_scattering(DATARRAY *scat_dp, DATARRAY *scat1m_dp,
                                     double r, double mu, double mu_s, double nu,
                                     int ray_r_mu_intersects_ground,
