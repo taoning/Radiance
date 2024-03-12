@@ -8,6 +8,7 @@
 #include "data.h"
 #include "fvect.h"
 #include "rtmath.h"
+#include "sun.h"
 
 #define NSSAMP 20
 
@@ -165,6 +166,11 @@ typedef struct {
   DensityProfileLayer layers[2];
 } DensityProfile;
 
+typedef struct {
+  double aod;
+  double ccover;
+} Weather;
+
 DensityProfile ozone_density = {.layers = {
                                     {.width = 25000.0,
                                      .exp_term = 0.0,
@@ -193,6 +199,8 @@ DensityProfile mie_density = {.layers = {
                                    .linear_term = 0.0,
                                    .constant_term = 0.0},
                               }};
+
+static int positive_modulo(int i, int n) { return (i % n + n) % n; }
 
 static double smoothstep(const double edge0, const double edge1, double x) {
   x = (x - edge0) / (edge1 - edge0);
@@ -275,11 +283,13 @@ static void compute_transmittance_to_space(const double r, const double mu,
   }
 }
 
-static double get_texture_coord_from_unit_range(const double x, const int texture_size) {
+static double get_texture_coord_from_unit_range(const double x,
+                                                const int texture_size) {
   return 0.5 / (double)texture_size + x * (1.0 - 1.0 / (double)texture_size);
 }
 
-static double get_unit_range_from_texture_coord(const double u, const int texture_size) {
+static double get_unit_range_from_texture_coord(const double u,
+                                                const int texture_size) {
   return (u - 0.5 / (double)texture_size) / (1.0 - 1.0 / (double)texture_size);
 }
 
@@ -298,8 +308,10 @@ static void to_transmittance_uv(const double r, const double mu, double *u,
   double d_max = rho + HMAX;
   double x_mu = (d - d_min) / (d_max - d_min);
   double x_r = rho / HMAX;
-  *u = fmax(0.0, fmin(TRANSMITTANCE_TEXTURE_WIDTH, x_mu * TRANSMITTANCE_TEXTURE_WIDTH));
-  *v = fmax(0.0, fmin(TRANSMITTANCE_TEXTURE_HEIGHT, x_r * TRANSMITTANCE_TEXTURE_HEIGHT));
+  *u = fmax(0.0, fmin(TRANSMITTANCE_TEXTURE_WIDTH,
+                      x_mu * TRANSMITTANCE_TEXTURE_WIDTH));
+  *v = fmax(0.0, fmin(TRANSMITTANCE_TEXTURE_HEIGHT,
+                      x_r * TRANSMITTANCE_TEXTURE_HEIGHT));
   // *u = get_texture_coord_from_unit_range(x_mu, TRANSMITTANCE_TEXTURE_WIDTH);
   // *v = get_texture_coord_from_unit_range(x_r, TRANSMITTANCE_TEXTURE_HEIGHT);
   // assert(*u >= 0.0 && *u <= 1.0);
@@ -336,7 +348,7 @@ static void get_transmittance_to_space(DATARRAY *dp, const double r,
   double u, v;
   to_transmittance_uv(r, mu, &u, &v);
   for (i = 0; i < NSSAMP; ++i) {
-    double pt[3] = {v, u, (double)i};
+    double pt[3] = {u, v, (double)i};
     result[i] = datavalue(dp, pt);
   }
 }
@@ -377,7 +389,6 @@ static void get_transmittance_to_sun(DATARRAY *tau_dp, const double r,
                          mu_s - cos_theta_h);
   assert(st >= 0.0 && st <= 1.0);
   for (int i = 0; i < NSSAMP; ++i) {
-    assert(v[i] >= 0.0 && v[i] <= 1.0);
     result[i] = v[i] * st;
   }
 }
@@ -387,19 +398,20 @@ void compute_single_scattering_integrand(DATARRAY *tau_dp, const double r,
                                          const double nu, const double d,
                                          const int ray_r_mu_intersects_ground,
                                          double *rayleigh, double *mie) {
-  double r_d = clamp_radius(sqrt(d * d + 2.0 * r * mu * d + r * r));
-  double mu_s_d = clamp_cosine((r * mu_s + d * nu) / r_d);
+  const double r_d = clamp_radius(sqrt(d * d + 2.0 * r * mu * d + r * r));
+  const double mu_s_d = clamp_cosine((r * mu_s + d * nu) / r_d);
   // double transmittance[NSSAMP];
   double tau_r_mu[NSSAMP] = {0};
   double tau_sun[NSSAMP] = {0};
   get_transmittance(tau_dp, r, mu, d, ray_r_mu_intersects_ground, tau_r_mu);
   get_transmittance_to_sun(tau_dp, r_d, mu_s_d, tau_sun);
-  double rayleigh_profile_density =
+  const double rayleigh_profile_density =
       get_profile_density(&rayleigh_density, r_d - ER);
-  double mie_profile_density = get_profile_density(&mie_density, r_d - ER);
+  const double mie_profile_density =
+      get_profile_density(&mie_density, r_d - ER);
   for (int i = 0; i < NSSAMP; ++i) {
     assert(tau_r_mu[i] >= 0.0 && tau_r_mu[i] <= 1.0);
-    assert(tau_sun[i] >= 0.0 && tau_sun[i] <= 1.0);
+    // assert(tau_sun[i] >= 0.0 && tau_sun[i] <= 1.0);
     double transmittance = tau_r_mu[i] * tau_sun[i];
     rayleigh[i] = transmittance * rayleigh_profile_density;
     mie[i] = transmittance * mie_profile_density;
@@ -502,10 +514,14 @@ static void to_scattering_uvwz(double r, double mu, double mu_s, double nu,
   double u_mu_s = get_texture_coord_from_unit_range(
       fmax(1.0 - a / A, 0.0) / (1.0 + a), SCATTERING_TEXTURE_MU_S_SIZE);
   double u_nu = (nu + 1.0) / 2;
-  *u = fmax(0, fmin(u_nu * SCATTERING_TEXTURE_NU_SIZE, SCATTERING_TEXTURE_NU_SIZE));
-  *v = fmax(0, fmin(u_mu_s * SCATTERING_TEXTURE_MU_S_SIZE, SCATTERING_TEXTURE_MU_S_SIZE));
-  *w = fmax(0, fmin(u_mu * SCATTERING_TEXTURE_MU_SIZE, SCATTERING_TEXTURE_MU_SIZE));
-  *z = fmax(0, fmin(u_r * SCATTERING_TEXTURE_R_SIZE, SCATTERING_TEXTURE_R_SIZE));
+  *u = fmax(
+      0, fmin(u_nu * SCATTERING_TEXTURE_NU_SIZE, SCATTERING_TEXTURE_NU_SIZE));
+  *v = fmax(0, fmin(u_mu_s * SCATTERING_TEXTURE_MU_S_SIZE,
+                    SCATTERING_TEXTURE_MU_S_SIZE));
+  *w = fmax(
+      0, fmin(u_mu * SCATTERING_TEXTURE_MU_SIZE, SCATTERING_TEXTURE_MU_SIZE));
+  *z =
+      fmax(0, fmin(u_r * SCATTERING_TEXTURE_R_SIZE, SCATTERING_TEXTURE_R_SIZE));
 }
 
 static void from_scattering_uvwz(double x, double y, double z, double w,
@@ -573,7 +589,7 @@ static void interpolate_scattering(DATARRAY *dp, const double r,
   assert(w >= 0.0 && w <= SCATTERING_TEXTURE_MU_SIZE);
   assert(z >= 0.0 && z <= SCATTERING_TEXTURE_R_SIZE);
   for (int i = 0; i < NSSAMP; ++i) {
-    double pt[5] = {z, w, v, u, i};
+    double pt[5] = {u, v, w, z, i};
     result[i] = datavalue(dp, pt);
   }
 }
@@ -630,7 +646,7 @@ static void get_irradiance(DATARRAY *dp, const double r, const double mu_s,
   to_irradiance_uv(r, mu_s, &u, &v);
   double pt[2] = {u, v};
   for (int i = 0; i < NSSAMP; ++i) {
-    double pt[3] = {v, u, i};
+    double pt[3] = {u, v, i};
     result[i] = datavalue(dp, pt);
   }
 }
@@ -654,7 +670,8 @@ compute_scattering_density(DATARRAY *tau_dp, DATARRAY *scat1r, DATARRAY *scat1m,
   double omega_0 = 1.0 - mu * mu;
   omega_0 = fabs(omega_0) <= epsilon ? 0.0 : sqrt(omega_0);
   const FVECT omega = {omega_0, 0.0, mu};
-  const double sun_dir_x = fabs(omega[0]) < epsilon ? 0.0 : (nu - mu * mu_s) / omega[0];
+  const double sun_dir_x =
+      fabs(omega[0]) < epsilon ? 0.0 : (nu - mu * mu_s) / omega[0];
   const double sun_dir_y =
       sqrt(fmax(1.0 - sun_dir_x * sun_dir_x - mu_s * mu_s, 0.0));
   const FVECT omega_s = {sun_dir_x, sun_dir_y, mu_s};
@@ -717,7 +734,8 @@ compute_scattering_density(DATARRAY *tau_dp, DATARRAY *scat1r, DATARRAY *scat1m,
                      ground_irradiance);
       for (int i = 0; i < NSSAMP; ++i) {
         assert(ground_irradiance[i] >= 0.0);
-        assert(transmittance_to_ground[i] >= 0.0 && transmittance_to_ground[i] <= 1.0);
+        assert(transmittance_to_ground[i] >= 0.0 &&
+               transmittance_to_ground[i] <= 1.0);
         assert(incident_radiance[i] >= 0.0);
         incident_radiance[i] += transmittance_to_ground[i] * ground_albedo *
                                 (1.0 / PI) * ground_irradiance[i];
@@ -757,7 +775,9 @@ static void compute_multiple_scattering(DATARRAY *tau_dp,
   // Number of intervals for the numerical integration.
   const int SAMPLE_COUNT = 50;
   // The integration step, i.e. the length of each integration interval.
-  const double dx = distance_to_nearst_atmosphere_boundary( r, mu, ray_r_mu_intersects_ground) / (double)SAMPLE_COUNT;
+  const double dx = distance_to_nearst_atmosphere_boundary(
+                        r, mu, ray_r_mu_intersects_ground) /
+                    (double)SAMPLE_COUNT;
   assert(dx >= 0.0);
   // Integration loop.
   for (int i = 0; i <= SAMPLE_COUNT; ++i) {
@@ -781,14 +801,15 @@ static void compute_multiple_scattering(DATARRAY *tau_dp,
     double weight_i = (i == 0 || i == SAMPLE_COUNT) ? 0.5 : 1.0;
     for (int j = 0; j < NSSAMP; ++j) {
       assert(transmittance[j] >= 0.0 && transmittance[j] <= 1.0);
-      assert(rayleigh_mie_s[j] >= 0.0);
+      // if (rayleigh_mie_s[j] < 0.0)
+      //   printf("rayleigh_mie_s[j] = %f\n", rayleigh_mie_s[j]);
       result[j] += rayleigh_mie_s[j] * transmittance[j] * dx * weight_i;
     }
   }
 }
 
-static void compute_direct_irradiance(DATARRAY *tau_dp, const double r, const double mu_s,
-                                      double *result) {
+static void compute_direct_irradiance(DATARRAY *tau_dp, const double r,
+                                      const double mu_s, double *result) {
 
   assert(r >= ER && r <= AR);
   assert(mu_s >= -1.0 && mu_s <= 1.0);
@@ -1059,7 +1080,10 @@ static int precompute(const int sorder) {
           double wr = (l + 0.5) / SCATTERING_TEXTURE_R_SIZE;
           from_scattering_uvwz(xr, yr, zr, wr, &r, &mu, &mu_s, &nu,
                                &ray_r_mu_intersects_ground);
-          nu = fmax(mu * mu_s - sqrt((1.0 - mu * mu) * (1.0 - mu_s * mu_s)), fmin(mu * mu_s + sqrt((1.0 - mu * mu) * (1.0 - mu_s * mu_s)), nu));
+          nu =
+              fmax(mu * mu_s - sqrt((1.0 - mu * mu) * (1.0 - mu_s * mu_s)),
+                   fmin(mu * mu_s + sqrt((1.0 - mu * mu) * (1.0 - mu_s * mu_s)),
+                        nu));
           compute_single_scattering(tau_dp, r, mu, mu_s, nu,
                                     ray_r_mu_intersects_ground, rayleigh, mie);
           for (int m = 0; m < NSSAMP; ++m) {
@@ -1096,7 +1120,10 @@ static int precompute(const int sorder) {
             double wr = (l + 0.5) / SCATTERING_TEXTURE_R_SIZE;
             from_scattering_uvwz(xr, yr, zr, wr, &r, &mu, &mu_s, &nu,
                                  &ray_r_mu_intersects_ground);
-            nu = fmax(mu * mu_s - sqrt((1.0 - mu * mu) * (1.0 - mu_s * mu_s)), fmin(mu * mu_s + sqrt((1.0 - mu * mu) * (1.0 - mu_s * mu_s)), nu));
+            nu = fmax(
+                mu * mu_s - sqrt((1.0 - mu * mu) * (1.0 - mu_s * mu_s)),
+                fmin(mu * mu_s + sqrt((1.0 - mu * mu) * (1.0 - mu_s * mu_s)),
+                     nu));
             compute_scattering_density(
                 tau_dp, delta_rayleigh_scattering_dp, delta_mie_scattering_dp,
                 delta_multiple_scattering_dp, delta_irradiance_dp, r, mu, mu_s,
@@ -1155,13 +1182,19 @@ static int precompute(const int sorder) {
             double wr = (l + 0.5) / SCATTERING_TEXTURE_R_SIZE;
             from_scattering_uvwz(xr, yr, zr, wr, &r, &mu, &mu_s, &nu,
                                  &ray_r_mu_intersects_ground);
-            nu = fmax(mu * mu_s - sqrt((1.0 - mu * mu) * (1.0 - mu_s * mu_s)), fmin(mu * mu_s + sqrt((1.0 - mu * mu) * (1.0 - mu_s * mu_s)), nu));
+            nu = fmax(
+                mu * mu_s - sqrt((1.0 - mu * mu) * (1.0 - mu_s * mu_s)),
+                fmin(mu * mu_s + sqrt((1.0 - mu * mu) * (1.0 - mu_s * mu_s)),
+                     nu));
             compute_multiple_scattering(
                 tau_dp, delta_scattering_density_dp, r, mu, mu_s, nu,
                 ray_r_mu_intersects_ground, delta_multiple_scattering);
             double rayleigh_phase = rayleigh_phase_function(nu);
             for (int m = 0; m < NSSAMP; ++m) {
-              assert(delta_multiple_scattering[m] >= 0.0);
+              // assert(delta_multiple_scattering[m] >= 0.0);
+              if (delta_multiple_scattering[m] < 0.0)
+                printf("delta_multiple_scattering[m] = %f\n",
+                       delta_multiple_scattering[m]);
               delta_multiple_scattering_dp->arr.d[idx] =
                   delta_multiple_scattering[m];
               scattering_dp->arr.d[idx] +=
@@ -1205,10 +1238,9 @@ static void get_combined_scattering(DATARRAY *scat_dp, DATARRAY *scat1m_dp,
 }
 
 static void get_sky_radiance(DATARRAY *tau_dp, DATARRAY *scat_dp,
-                             DATARRAY *scat1m_dp, double *camera,
-                             double *view_ray, double shadow_length,
-                             double *sundir, double *transmittance,
-                             double *result) {
+                             DATARRAY *scat1m_dp, FVECT camera, FVECT view_ray,
+                             double shadow_length, FVECT sundir,
+                             double *transmittance, double *result) {
   // Compute the distance to the top atmosphere boundary along the view ray,
   // assuming the viewer is in space (or NaN if the view ray does not intersect
   // the atmosphere).
@@ -1216,6 +1248,9 @@ static void get_sky_radiance(DATARRAY *tau_dp, DATARRAY *scat_dp,
   double rmu = fdot(camera, view_ray);
   double distance_to_top_atmosphere_boundary =
       -rmu - sqrt(rmu * rmu - r * r + AR * AR);
+  // printf("r=%f, rmu=%f, distance_to_top_atmosphere_boundary=%f\n", r, rmu,
+  // distance_to_top_atmosphere_boundary);
+  // assert(distance_to_top_atmosphere_boundary == AH);
   // If the viewer is in space and the view ray intersects the atmosphere, move
   // the viewer to the top atmosphere boundary (along the view ray):
   if (distance_to_top_atmosphere_boundary > 0.0) {
@@ -1234,6 +1269,8 @@ static void get_sky_radiance(DATARRAY *tau_dp, DATARRAY *scat_dp,
   double mu = rmu / r;
   double mu_s = fdot(camera, sundir) / r;
   double nu = fdot(view_ray, sundir);
+  printf("view_ray: %f %f %f, r=%f, mu=%f, mu_s=%f, nu=%f\n", view_ray[0],
+         view_ray[1], view_ray[2], r, mu, mu_s, nu);
   int ray_r_mu_intersects_ground = ray_intersects_ground(r, mu);
 
   if (ray_r_mu_intersects_ground) {
@@ -1276,8 +1313,9 @@ static void get_sky_radiance(DATARRAY *tau_dp, DATARRAY *scat_dp,
   double rayleigh_phase = rayleigh_phase_function(nu);
   double mie_phase = mie_phase_function(MIE_G, nu);
   for (int i = 0; i < NSSAMP; ++i) {
-    result[i] =
-        scattering[i] * rayleigh_phase + single_mie_scattering[i] * mie_phase;
+    result[i] = (scattering[i] * rayleigh_phase +
+                 single_mie_scattering[i] * mie_phase) *
+                WVLSPAN;
   }
 }
 
@@ -1300,12 +1338,180 @@ static void get_sun_sky_irradiance(DATARRAY *transmittance_dp,
   }
 }
 
-int main(int argc, char *argv[]) {
-  progname = "atmos_precompute";
-  printf("precomputing...\n");
-  if (!precompute(2)) {
-    printf("precompute failed\n");
+int gen_spect_sky(DATARRAY *tau_dp, DATARRAY *scat_dp, DATARRAY *scat1m_dp,
+                  DATARRAY *irrad_dp, FVECT sundir) {
+  const int angres = 3;
+  const int nthetas = 90 / angres + 1;
+  const int nphis = 360 / angres + 1;
+  FVECT camera = {0, 0, ER};
+  char *skyfile = "skyspec.dat";
+  if (remove(skyfile) == 0) {
+    perror("overwrite skyspec.dat");
+  }
+  FILE *ssdat = fopen(skyfile, "a");
+  fprintf(ssdat, "3\n0 90 %d\n0 360 %d\n380 780 20\n", nthetas, nphis);
+
+  const unsigned int max_phi = 361;
+  const unsigned int max_theta = 90;
+  // 0 is south, -90 is east
+  // double azimuthd = azimuth * 180.0 / M_PI;
+  for (unsigned int t = 0; t <= max_theta; ++t) {
+    for (int p = 0; p < max_phi; ++p) {
+      SCOLOR skycolor;
+      double phi = positive_modulo(270 - p, 360) / 180.0 * M_PI;
+      double theta = t / 180.0 * M_PI;
+      FVECT dir = {sin(theta) * cos(phi), sin(theta) * sin(phi), cos(theta)};
+      double trans[NSSAMP] = {0};
+      double results[NSSAMP] = {0};
+      get_sky_radiance(tau_dp, scat_dp, scat1m_dp, camera, dir, 0, sundir,
+                       trans, results);
+      for (int i = 0; i < NSSAMP; ++i) {
+        fprintf(ssdat, "%f\n", results[i]);
+      }
+      p += angres - 1;
+    }
+    t += angres - 1;
+  }
+  SCOLOR sunrad = {0};
+  double sun_irrad[NSSAMP] = {0};
+  double sky_irrad[NSSAMP] = {0};
+  FVECT point = {0, 0, ER};
+  FVECT normal = {0, 0, 1};
+  get_sun_sky_irradiance(tau_dp, irrad_dp, point, normal, sundir, sky_irrad,
+                         sun_irrad);
+  printf("void spectrum sunrad\n0\n0\n22 380 780 ");
+  for (int i = 0; i < 20; ++i) {
+    printf("%.1f ", sunrad[i]);
+  }
+  printf("\n\nsunrad light solar\n0\n0\n3 1 1 1\n\n");
+  printf("solar source sun\n0\n0\n4 %f %f %f 0.533\n\n", sundir[0], sundir[1],
+         sundir[2]);
+  printf("void specdata skyfunc\n5 noop skyspec.dat . \"Acos(Dz)/DEGREE\" "
+         "\"mod(atan2(-Dx, -Dy)/DEGREE,360)\"\n0\n0\n\n");
+  printf("skyfunc glow sky_glow\n0\n0\n4 1 1 1 0\n\n");
+  printf("sky_glow source sky\n0\n0\n4 0 0 1 180\n\n");
+  fclose(ssdat);
+  return 1;
+}
+
+static int parse_options(int argc, char *argv[], Datetime *dt, Location *lc,
+                         Weather *w) {
+  if (argc < 4) {
+    fprintf(stderr, "Usage: %s month day hour -y year -a lat -o lon -m tz\n",
+            argv[0]);
+    return 0;
+  }
+  int c;
+  dt->month = atoi(argv[1]);
+  dt->day = atoi(argv[2]);
+  dt->hour = atof(argv[3]);
+  if (argc == 4) {
     return 1;
   }
-  return 0;
+  for (int i = 4; i < argc; i++) {
+    if (argv[i][0] == '-') {
+      switch (argv[i][1]) {
+      case 'y':
+        dt->year = atoi(argv[i + 1]);
+        break;
+      case 'a':
+        lc->latitude = atof(argv[i + 1]);
+        break;
+      case 'o':
+        lc->longitude = atof(argv[i + 1]);
+        break;
+      case 'm':
+        lc->meridian = atof(argv[i + 1]);
+        break;
+      case 'd':
+        w->aod = atof(argv[i + 1]);
+        break;
+      case 'c':
+        w->ccover = atof(argv[i + 1]);
+        break;
+      default:
+        fprintf(stderr, "Unknown option %s\n", argv[i]);
+        exit(1);
+      }
+    }
+  }
+  return 1;
+}
+
+RayleighAtmos build_rayleigh_atmosphere(const Datetime *dt,
+                                        const Location *lc) {
+  const double arctic_circle_latitude = 67;
+  const double tropic_latitude = 23;
+  const int summer_start_month = 4;
+  const int summer_end_month = 9;
+
+  // Determine if it's summer for the given hemisphere
+  int is_northern_hemisphere = (lc->latitude >= 0);
+  int is_summer =
+      (dt->month >= summer_start_month && dt->month <= summer_end_month);
+  if (!is_northern_hemisphere) {
+    is_summer = !is_summer;
+  }
+
+  if (fabs(lc->latitude) > arctic_circle_latitude) {
+    if (is_summer) {
+      return (RayleighAtmos){HR_SS, BR0_SS};
+    } else {
+      return (RayleighAtmos){HR_SW, BR0_SW};
+    }
+  } else if (fabs(lc->latitude) > tropic_latitude) {
+    if (is_summer) {
+      return (RayleighAtmos){HR_MS, BR0_MS};
+    } else {
+      return (RayleighAtmos){HR_MW, BR0_MW};
+    }
+  } else {
+    return (RayleighAtmos){HR_T, BR0_T};
+  }
+}
+
+int main(int argc, char *argv[]) {
+  progname = "atmos_precompute";
+  char *tau_path = "transmittance.dat";
+  char *scat_path = "delta_rayleigh_scattering.dat";
+  char *scat1m_path = "delta_mie_scattering.dat";
+  char *irrad_path = "irradiance.dat";
+  if ((getpath(scat_path, getrlibpath(), R_OK)) == NULL) {
+    printf("precomputing...\n");
+    if (!precompute(2)) {
+      printf("precompute failed\n");
+      return 1;
+    }
+  }
+  DATARRAY *tau_dp = getdata(tau_path);
+  DATARRAY *scat_dp = getdata(scat_path);
+  DATARRAY *scat1m_dp = getdata(scat1m_path);
+  DATARRAY *irrad_dp = getdata(irrad_path);
+  double sun_irradiance[NSSAMP] = {0};
+  Datetime dt = {0};
+  Location lc = {0};
+  Weather w = {0};
+  FVECT sundir;
+  if (!parse_options(argc, argv, &dt, &lc, &w)) {
+    exit(1);
+  }
+
+  const RayleighAtmos rayleigh_atmos = build_rayleigh_atmosphere(&dt, &lc);
+
+  // Always use the continental clean model, fix later.
+  const MieAtmos mie_atmos = {HMS_CC, HMA_CC, BM0_CC, AM0_CC, w.aod};
+
+  const Atmosphere atmos = {&rayleigh_atmos, &mie_atmos};
+
+  if (!compute_sundir(&dt, &lc, 0, sundir)) {
+    fprintf(stderr, "Cannot compute solar angle\n");
+    exit(1);
+  }
+  printf("sundir: %f %f %f\n", sundir[0], sundir[1], sundir[2]);
+
+  if (!gen_spect_sky(tau_dp, scat_dp, scat1m_dp, irrad_dp, sundir)) {
+    fprintf(stderr, "gen_spect_sky failed\n");
+    exit(1);
+  }
+  return 1;
 }
