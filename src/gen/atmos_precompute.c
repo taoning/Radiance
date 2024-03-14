@@ -1251,7 +1251,7 @@ static void get_combined_scattering(DATARRAY *scat_dp, DATARRAY *scat1m_dp,
   double u, v, w, z;
   to_scattering_uvwz(r, mu, mu_s, nu, ray_r_mu_intersects_ground, &u, &v, &w,
                      &z);
-  double pt[4] = {u, v, w, z};
+  double pt[4] = {z, w, v, u};
   DATARRAY *scat_res = datavector(scat_dp, pt);
   DATARRAY *scat1m_res = datavector(scat1m_dp, pt);
   for (int i = 0; i < NSSAMP; ++i) {
@@ -1295,7 +1295,7 @@ static void get_sky_radiance(DATARRAY *tau_dp, DATARRAY *scat_dp,
   double mu_s = fdot(camera, sundir) / r;
   double nu = fdot(view_ray, sundir);
   // printf("view_ray: %f %f %f, r=%f, mu=%f, mu_s=%f, nu=%f\n", view_ray[0],
-  // view_ray[1], view_ray[2], r, mu, mu_s, nu);
+  //        view_ray[1], view_ray[2], r, mu, mu_s, nu);
   int ray_r_mu_intersects_ground = ray_intersects_ground(r, mu);
 
   if (ray_r_mu_intersects_ground) {
@@ -1344,7 +1344,7 @@ static void get_sky_radiance(DATARRAY *tau_dp, DATARRAY *scat_dp,
   double mie_phase = mie_phase_function(MIE_G, nu);
   for (int i = 0; i < NSSAMP; ++i) {
     result[i] =
-        (scattering[i] * rayleigh_phase + single_mie_scattering[i] * mie_phase);
+        scattering[i] * rayleigh_phase + single_mie_scattering[i] * mie_phase;
   }
 }
 
@@ -1392,6 +1392,9 @@ int gen_spect_sky(DATARRAY *tau_dp, DATARRAY *scat_dp, DATARRAY *scat1m_dp,
       double phi = positive_modulo(270 - p, 360) / 180.0 * M_PI;
       double theta = t / 180.0 * M_PI;
       FVECT dir = {sin(theta) * cos(phi), sin(theta) * sin(phi), cos(theta)};
+      // printf("theta: %f, phi: %f, dir: %f %f %f\n", theta, phi, dir[0],
+      // dir[1],
+      //        dir[2]);
       float trans[NSSAMP] = {0};
       float results[NSSAMP] = {0};
       get_sky_radiance(tau_dp, scat_dp, scat1m_dp, camera, dir, 0, sundir,
@@ -1545,17 +1548,18 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "gen_spect_sky failed\n");
     exit(1);
   }
-  float results[NSSAMP] = {0};
-  SCOLOR trans;
-  FVECT dir = {0, 1, 0};
-  FVECT camera = {0, 0, ER + 1};
-  FVECT sundir2 = {.021143, -0.869787, 0.492974};
-  get_sky_radiance(tau_dp, scat_dp, scat1m_dp, camera, dir, 0, sundir2, trans,
-                   results);
-  DATARRAY *tau = get_transmittance_to_space(tau_dp, ER, 0.0);
-  for (int i = 0; i < 20; ++i) {
-    printf("%f\n", results[i]);
-  }
-  free(tau);
+  // float results[NSSAMP] = {0};
+  // SCOLOR trans;
+  // FVECT dir = {0, 1, 0};
+  // FVECT camera = {0, 0, ER + 1};
+  // FVECT sundir2 = {.021143, -0.869787, 0.492974};
+  // get_sky_radiance(tau_dp, scat_dp, scat1m_dp, camera, dir, 0, sundir2,
+  // trans,
+  //                  results);
+  // DATARRAY *tau = get_transmittance_to_space(tau_dp, ER, 0.0);
+  // for (int i = 0; i < 20; ++i) {
+  //   printf("%f\n", results[i]);
+  // }
+  // free(tau);
   return 1;
 }
