@@ -149,7 +149,7 @@ int main(int argc, char *argv[]) {
 
   const Atmosphere atmos = {&rayleigh_atmos, &mie_atmos};
 
-  if (!compute_sundir(sundir, &dt, &lc, 0)) {
+  if (!compute_sundir(&dt, &lc, 0, sundir)) {
     fprintf(stderr, "Cannot compute solar angle\n");
     exit(1);
   }
