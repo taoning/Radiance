@@ -1,5 +1,5 @@
 #ifndef lint
-static const char	RCSid[] = "$Id: data.c,v 2.37 2024/03/12 16:54:51 greg Exp $";
+static const char	RCSid[] = "$Id: data.c,v 2.41 2024/03/14 06:30:53 greg Exp $";
 #endif
 /*
  *  data.c - routines dealing with interpolated data.
@@ -373,6 +373,10 @@ freedata(			/* release data array reference */
 	if (dta == NULL) {			/* free all if NULL */
 		hval = 0; nents = TABSIZ;
 	} else {
+		if (dta->next == dta) {
+			free(dta);		/* unlisted temp array */
+			return;
+		}
 		hval = hash(dta->name); nents = 1;
 		if (!*dta->name) {		/* not a data file? */
 			dta->next = dtab[hval];
@@ -405,6 +409,9 @@ data_interp(DATARRAY *dp, double *pt, double coef, DATATYPE *rvec)
 	DATARRAY	sd;
 	int		stride, i;
 	double		x, c0, c1, y0, y1;
+					/* unlikely, but may as well check */
+	if ((-FTINY <= coef) & (coef <= FTINY))
+		return(0.);
 					/* set up dimensions for recursion */
 	if (dp->nd > 1) {
 		sd.name = dp->name;
@@ -426,7 +433,7 @@ data_interp(DATARRAY *dp, double *pt, double coef, DATATYPE *rvec)
 			i = dp->dim[0].ne - 2;
 	} else {				/* unevenly spaced points */
 		int	lower, upper;
-		if (dp->dim[0].siz > 0.0) {
+		if (dp->dim[0].siz > 0.) {
 			lower = 0;
 			upper = dp->dim[0].ne;
 		} else {
@@ -471,27 +478,27 @@ data_interp(DATARRAY *dp, double *pt, double coef, DATATYPE *rvec)
 			for (i = sd.dim[0].ne; i--; )
 				rvec[i] += c0*sd.arr.d[i]
 					+ c1*sd.arr.d[i+stride];
-			return(0.);
-		}
-		if (dp->type == SPECTY) {
+		} else if (dp->type == SPECTY) {
 			double	f;
 			sd.arr.s = dp->arr.s + i*stride;
-			f = ldexp(1.0, (int)sd.arr.s[sd.dim[0].ne]
-					- (COLXS+8));
-			for (i = sd.dim[0].ne; i--; )
-				rvec[i] += c0*f*(sd.arr.s[i] + 0.5);
+			if ((sd.arr.s[sd.dim[0].ne] > 0) & ((-FTINY>c0)|(c0>FTINY))) {
+				f = ldexp(c0, (int)sd.arr.s[sd.dim[0].ne]-(COLXS+8));
+				for (i = sd.dim[0].ne; i--; )
+					rvec[i] += f*(sd.arr.s[i] + .5);
+			}
 			sd.arr.s += stride;
-			f = ldexp(1.0, (int)sd.arr.s[sd.dim[0].ne]
-					- (COLXS+8));
+			if ((sd.arr.s[sd.dim[0].ne] > 0) & ((-FTINY>c1)|(c1>FTINY))) {
+				f = ldexp(c1, (int)sd.arr.s[sd.dim[0].ne]-(COLXS+8));
+				for (i = sd.dim[0].ne; i--; )
+					rvec[i] += f*(sd.arr.s[i] + .5);
+			}
+		} else {
+			sd.arr.c = dp->arr.c + i*stride;
 			for (i = sd.dim[0].ne; i--; )
-				rvec[i] += c1*f*(sd.arr.s[i] + 0.5);
-			return(0.);
+				rvec[i] += c0*colrval(sd.arr.c[i],sd.type)
+					+ c1*colrval(sd.arr.c[i+stride],sd.type);
 		}
-		sd.arr.c = dp->arr.c + i*stride;
-		for (i = sd.dim[0].ne; i--; )
-			rvec[i] += c0*colrval(sd.arr.c[i],sd.type)
-				+ c1*colrval(sd.arr.c[i+stride],sd.type);
-		return(0.);
+		return(0.);		/* return value ignored */
 	}
 					/* get dependent variable */
 	if (dp->nd > 1) {
@@ -515,12 +522,14 @@ data_interp(DATARRAY *dp, double *pt, double coef, DATATYPE *rvec)
 			y1 = dp->arr.d[i+1];
 		} else if (dp->type == SPECTY) {
 			if (dp->arr.s[dp->dim[0].ne]) {
-				double	f = ldexp(1.0, -(COLXS+8) +
-						(int)dp->arr.s[dp->dim[0].ne]);
-				y0 = (dp->arr.s[i] + 0.5)*f;
-				y1 = (dp->arr.s[i+1] + 0.5)*f;
+				double	f = dp->arr.s[dp->dim[0].ne]
+					? ldexp(1., -(COLXS+8) +
+						(int)dp->arr.s[dp->dim[0].ne])
+					: 0.;
+				y0 = f*(dp->arr.s[i] + 0.5);
+				y1 = f*(dp->arr.s[i+1] + 0.5);
 			} else
-				y0 = y1 = 0.0;
+				y0 = y1 = 0.;
 		} else {
 			y0 = colrval(dp->arr.c[i],dp->type);
 			y1 = colrval(dp->arr.c[i+1],dp->type);
@@ -556,7 +565,7 @@ datavector(DATARRAY *dp, double *pt)
 				sizeof(DATATYPE)*dp->dim[dp->nd-1].ne);
 	if (newdp == NULL)
 		error(SYSTEM, "out of memory in datavector");
-	newdp->next = NULL;
+	newdp->next = newdp;		/* flags us as temp vector */
 	newdp->name = dp->name;
 	newdp->type = DATATY;
 	newdp->nd = 1;			/* vector data goes here */
@@ -569,109 +578,3 @@ datavector(DATARRAY *dp, double *pt)
 	return(newdp);			/* will be free'd using free() */
 }
 
-
-#if 0
-double
-datavalue(		/* interpolate data value at a point */
-	DATARRAY  *dp,
-	double	*pt
-)
-{
-	DATARRAY  sd;
-	int  asize;
-	int  lower, upper;
-	int  i;
-	double	x, y0, y1;
-					/* set up dimensions for recursion */
-	if (dp->nd > 1) {
-		sd.name = dp->name;
-		sd.type = dp->type;
-		sd.nd = dp->nd - 1;
-		asize = 1;
-		for (i = 0; i < sd.nd; i++) {
-			sd.dim[i].org = dp->dim[i+1].org;
-			sd.dim[i].siz = dp->dim[i+1].siz;
-			sd.dim[i].p = dp->dim[i+1].p;
-			asize *= (sd.dim[i].ne = dp->dim[i+1].ne) +
-				((sd.type==SPECTY) & (i==sd.nd-1));
-		}
-	}
-					/* get independent variable */
-	if (dp->dim[0].p == NULL) {		/* evenly spaced points */
-		x = (pt[0] - dp->dim[0].org)/dp->dim[0].siz;
-		x *= (double)(dp->dim[0].ne - 1);
-		i = x;
-		if (i < 0)
-			i = 0;
-		else if (i > dp->dim[0].ne - 2)
-			i = dp->dim[0].ne - 2;
-	} else {				/* unevenly spaced points */
-		if (dp->dim[0].siz > 0.0) {
-			lower = 0;
-			upper = dp->dim[0].ne;
-		} else {
-			lower = dp->dim[0].ne;
-			upper = 0;
-		}
-		do {
-			i = (lower + upper) >> 1;
-			if (pt[0] >= dp->dim[0].p[i])
-				lower = i;
-			else
-				upper = i;
-		} while (i != (lower + upper) >> 1);
-
-		if (i > dp->dim[0].ne - 2)
-			i = dp->dim[0].ne - 2;
-
-		x = i + (pt[0] - dp->dim[0].p[i]) /
-				(dp->dim[0].p[i+1] - dp->dim[0].p[i]);
-	}
-					/* get dependent variable */
-	if (dp->nd > 1) {
-		if (dp->type == DATATY) {
-			sd.arr.d = dp->arr.d + i*asize;
-			y0 = datavalue(&sd, pt+1);
-			sd.arr.d += asize;
-			y1 = datavalue(&sd, pt+1);
-		} else if (dp->type == SPECTY) {
-			sd.arr.s = dp->arr.s + i*asize;
-			y0 = datavalue(&sd, pt+1);
-			sd.arr.s += asize;
-			y1 = datavalue(&sd, pt+1);
-		} else {
-			sd.arr.c = dp->arr.c + i*asize;
-			y0 = datavalue(&sd, pt+1);
-			sd.arr.c += asize;
-			y1 = datavalue(&sd, pt+1);
-		}
-	} else {
-		if (dp->type == DATATY) {
-			y0 = dp->arr.d[i];
-			y1 = dp->arr.d[i+1];
-		} else if (dp->type == SPECTY) {
-			if (dp->arr.s[dp->dim[0].ne]) {
-				double	f = ldexp(1.0, -(COLXS+8) +
-						(int)dp->arr.s[dp->dim[0].ne]);
-				y0 = (dp->arr.s[i] + 0.5)*f;
-				y1 = (dp->arr.s[i+1] + 0.5)*f;
-			} else
-				y0 = y1 = 0.0;
-		} else {
-			y0 = colrval(dp->arr.c[i],dp->type);
-			y1 = colrval(dp->arr.c[i+1],dp->type);
-		}
-	}
-	/*
-	 * Extrapolate as far as one division, then
-	 * taper off harmonically to zero.
-	 */
-	if (x > i+2)
-		return( (2*y1-y0)/(x-(i-1)) );
-
-	if (x < i-1)
-		return( (2*y0-y1)/(i-x) );
-
-	return( y0*((i+1)-x) + y1*(x-i) );
-}
-#endif
