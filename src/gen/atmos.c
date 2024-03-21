@@ -1,4 +1,3 @@
-
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
@@ -39,7 +38,6 @@ const double HR_SW = 7600; // Subarctic winter
 const double HR_T = 9050;  // Tropical
 // Mie scattering
 const double HMS_CC = 2385; // Continental clean
-// const double HMS_CC = 1200; // Continental clean
 // Mie absorption
 const double HMA_CC = 4300; // Continental clean
 
@@ -77,6 +75,7 @@ const float BR0_SS[NSSAMP] = {
     1.14887667e-05, 9.93120528e-06, 8.62962901e-06, 7.53513326e-06,
     6.60925660e-06, 5.82168833e-06, 5.14848557e-06, 4.56978082e-06,
     4.07054608e-06, 3.63779107e-06, 3.26107261e-06, 2.93198523e-06};
+
 const float BR0_SW[NSSAMP] = {
     5.30623659e-05, 4.30894595e-05, 3.53673035e-05, 2.93082494e-05,
     2.45012287e-05, 2.06447149e-05, 1.75213353e-05, 1.49693438e-05,
@@ -119,15 +118,15 @@ const double MIE_G = 0.76;
 const int TRANSMITTANCE_TEXTURE_WIDTH = 256;
 const int TRANSMITTANCE_TEXTURE_HEIGHT = 64;
 
-// const int SCATTERING_TEXTURE_R_SIZE = 32;
-// const int SCATTERING_TEXTURE_MU_SIZE = 128;
-// const int SCATTERING_TEXTURE_MU_S_SIZE = 32;
-// const int SCATTERING_TEXTURE_NU_SIZE = 8;
+const int SCATTERING_TEXTURE_R_SIZE = 32;
+const int SCATTERING_TEXTURE_MU_SIZE = 128;
+const int SCATTERING_TEXTURE_MU_S_SIZE = 32;
+const int SCATTERING_TEXTURE_NU_SIZE = 8;
 
-const int SCATTERING_TEXTURE_R_SIZE = 16;
-const int SCATTERING_TEXTURE_MU_SIZE = 64;
-const int SCATTERING_TEXTURE_MU_S_SIZE = 16;
-const int SCATTERING_TEXTURE_NU_SIZE = 4;
+// const int SCATTERING_TEXTURE_R_SIZE = 16;
+// const int SCATTERING_TEXTURE_MU_SIZE = 64;
+// const int SCATTERING_TEXTURE_MU_S_SIZE = 16;
+// const int SCATTERING_TEXTURE_NU_SIZE = 4;
 
 const int IRRADIANCE_TEXTURE_WIDTH = 64;
 const int IRRADIANCE_TEXTURE_HEIGHT = 16;
@@ -179,6 +178,13 @@ DensityProfile mie_density = {.layers = {
                               }};
 
 static int positive_modulo(int i, int n) { return (i % n + n) % n; }
+
+static int compute_mie_coefficients(double alpha, double beta, double scaleheight, double *results) {
+  for (int i = 0; i < NSSAMP; ++i) {
+    double lambda = (START_WVL + (END_WVL - START_WVL) * i / (NSSAMP - 1)) / 1.0e3;
+    results[i] = beta / scaleheight * pow(lambda, -alpha);
+  }
+}
 
 static double smoothstep(const double edge0, const double edge1, double x) {
   x = (x - edge0) / (edge1 - edge0);
@@ -1220,7 +1226,7 @@ static int precompute(const int sorder) {
   return 1;
 }
 
-static void get_sky_radiance(DATARRAY *tau_dp, DATARRAY *scat_dp,
+void get_sky_radiance(DATARRAY *tau_dp, DATARRAY *scat_dp,
                              DATARRAY *scat1m_dp, FVECT camera, FVECT view_ray,
                              double shadow_length, FVECT sundir,
                              float *transmittance, float *result) {
@@ -1230,14 +1236,12 @@ static void get_sky_radiance(DATARRAY *tau_dp, DATARRAY *scat_dp,
   double mu = rmu / r;
   double mu_s = fdot(camera, sundir) / r;
   double nu = fdot(view_ray, sundir);
-  printf("r = %f, mu = %f, mu_s = %f, nu = %f\n", r, mu, mu_s, nu);
   // Compute the transmittance to the top atmosphere
   DATARRAY *transmittance_to_space = get_transmittance_to_space(tau_dp, r, mu);
   for (int i = 0; i < NSSAMP; ++i) {
     transmittance[i] = transmittance_to_space->arr.d[i];
   }
   to_scattering_uvwz(r, mu, mu_s, nu, 0, &u, &v, &w, &z);
-  printf("u = %f, v = %f, w = %f, z = %f\n", u, v, w, z);
   double pt[4] = {z, w, v, u};
   DATARRAY *scattering = datavector(scat_dp, pt);
   DATARRAY *single_mie_scattering = datavector(scat1m_dp, pt);
@@ -1246,208 +1250,12 @@ static void get_sky_radiance(DATARRAY *tau_dp, DATARRAY *scat_dp,
   for (int i = 0; i < NSSAMP; ++i) {
     result[i] = scattering->arr.d[i] * rayleigh_phase +
                 single_mie_scattering->arr.d[i] * mie_phase;
-    // result[i] = scattering->arr.d[i] * rayleigh_phase;
   }
   free(transmittance_to_space);
   free(single_mie_scattering);
   free(scattering);
 }
 
-static void get_sun_sky_irradiance(DATARRAY *transmittance_dp,
-                                   DATARRAY *irradiance_dp, double *point,
-                                   double *normal, double *sun_direction,
-                                   double *sky_irradiance,
-                                   double *sun_irradiance) {
-  double r = VLEN(point);
-  double mu_s = fdot(point, sun_direction) / r;
+int build_atmosphere() {
 
-  // Indirect irradiance (approximated if the surface is not horizontal).
-  DATARRAY *sky_irrad = get_irradiance(irradiance_dp, r, mu_s);
-  double transmittance_sun[NSSAMP] = {0};
-  get_transmittance_to_sun(transmittance_dp, r, mu_s, transmittance_sun);
-  for (int i = 0; i < NSSAMP; ++i) {
-    sky_irradiance[i] =
-        sky_irrad->arr.d[i] * (1.0 + fdot(normal, point) / r) * 0.5;
-    sun_irradiance[i] = EXTSOL[i] * transmittance_sun[i] *
-                        fmax(fdot(normal, sun_direction), 0.0);
   }
-  free(sky_irrad);
-}
-
-int gen_spect_sky(DATARRAY *tau_dp, DATARRAY *scat_dp, DATARRAY *scat1m_dp,
-                  DATARRAY *irrad_dp, FVECT sundir) {
-  const int angres = 3;
-  const int nthetas = 90 / angres + 1;
-  const int nphis = 360 / angres + 1;
-  FVECT camera = {0, 0, ER};
-  char *skyfile = "skyspec2.dat";
-  if (remove(skyfile) == 0) {
-    perror("overwrite skyspec2.dat");
-  }
-  FILE *ssdat = fopen(skyfile, "w");
-  fprintf(ssdat, "3\n0 90 %d\n0 360 %d\n380 780 20\n", nthetas, nphis);
-
-  const unsigned int max_phi = 361;
-  const unsigned int max_theta = 90;
-  // 0 is south, -90 is east
-  // double azimuthd = azimuth * 180.0 / M_PI;
-  for (unsigned int t = 0; t <= max_theta; ++t) {
-    for (int p = 0; p < max_phi; ++p) {
-      SCOLOR skycolor;
-      double phi = positive_modulo(270 - p, 360) / 180.0 * M_PI;
-      double theta = t / 180.0 * M_PI;
-      FVECT dir = {sin(theta) * cos(phi), sin(theta) * sin(phi), cos(theta)};
-      float trans[NSSAMP] = {0};
-      float results[NSSAMP] = {0};
-      get_sky_radiance(tau_dp, scat_dp, scat1m_dp, camera, dir, 0, sundir,
-                       trans, results);
-      for (int i = 0; i < NSSAMP; ++i) {
-        fprintf(ssdat, "%f\n", results[i] * WVLSPAN);
-      }
-      p += angres - 1;
-    }
-    t += angres - 1;
-  }
-  fclose(ssdat);
-  SCOLOR sunrad = {0};
-  double sun_irrad[NSSAMP] = {0};
-  double sky_irrad[NSSAMP] = {0};
-  FVECT point = {0, 0, ER};
-  FVECT normal = {0, 0, 1};
-  get_sun_sky_irradiance(tau_dp, irrad_dp, point, normal, sundir, sky_irrad,
-                         sun_irrad);
-  printf("void spectrum sunrad\n0\n0\n22 380 780 ");
-  for (int i = 0; i < 20; ++i) {
-    printf("%.1f ", sunrad[i]);
-  }
-  printf("\n\nsunrad light solar\n0\n0\n3 1 1 1\n\n");
-  printf("solar source sun\n0\n0\n4 %f %f %f 0.533\n\n", sundir[0], sundir[1],
-         sundir[2]);
-  printf("void specdata skyfunc\n5 noop %s . \"Acos(Dz)/DEGREE\" "
-         "\"mod(atan2(-Dx, -Dy)/DEGREE,360)\"\n0\n0\n\n",
-         skyfile);
-  printf("skyfunc glow sky_glow\n0\n0\n4 1 1 1 0\n\n");
-  printf("sky_glow source sky\n0\n0\n4 0 0 1 180\n\n");
-  return 1;
-}
-
-static int parse_options(int argc, char *argv[], Datetime *dt, Location *lc,
-                         Weather *w) {
-  if (argc < 4) {
-    fprintf(stderr, "Usage: %s month day hour -y year -a lat -o lon -m tz\n",
-            argv[0]);
-    return 0;
-  }
-  int c;
-  dt->month = atoi(argv[1]);
-  dt->day = atoi(argv[2]);
-  dt->hour = atof(argv[3]);
-  if (argc == 4) {
-    return 1;
-  }
-  for (int i = 4; i < argc; i++) {
-    if (argv[i][0] == '-') {
-      switch (argv[i][1]) {
-      case 'a':
-        lc->latitude = atof(argv[i + 1]);
-        break;
-      case 'c':
-        w->ccover = atof(argv[i + 1]);
-        break;
-      case 'd':
-        w->aod = atof(argv[i + 1]);
-        break;
-      case 'm':
-        lc->meridian = atof(argv[i + 1]);
-        break;
-      case 'o':
-        lc->longitude = atof(argv[i + 1]);
-        break;
-      case 'y':
-        dt->year = atoi(argv[i + 1]);
-        break;
-      default:
-        fprintf(stderr, "Unknown option %s\n", argv[i]);
-        exit(1);
-      }
-    }
-  }
-  return 1;
-}
-
-RayleighAtmos build_rayleigh_atmosphere(const Datetime *dt,
-                                        const Location *lc) {
-  const double arctic_circle_latitude = 67;
-  const double tropic_latitude = 23;
-  const int summer_start_month = 4;
-  const int summer_end_month = 9;
-
-  // Determine if it's summer for the given hemisphere
-  int is_northern_hemisphere = (lc->latitude >= 0);
-  int is_summer =
-      (dt->month >= summer_start_month && dt->month <= summer_end_month);
-  if (!is_northern_hemisphere) {
-    is_summer = !is_summer;
-  }
-
-  if (fabs(lc->latitude) > arctic_circle_latitude) {
-    if (is_summer) {
-      return (RayleighAtmos){HR_SS, BR0_SS};
-    } else {
-      return (RayleighAtmos){HR_SW, BR0_SW};
-    }
-  } else if (fabs(lc->latitude) > tropic_latitude) {
-    if (is_summer) {
-      return (RayleighAtmos){HR_MS, BR0_MS};
-    } else {
-      return (RayleighAtmos){HR_MW, BR0_MW};
-    }
-  } else {
-    return (RayleighAtmos){HR_T, BR0_T};
-  }
-}
-
-int main(int argc, char *argv[]) {
-  progname = "atmos_precompute";
-  char *tau_path = "transmittance.dat";
-  char *scat_path = "scattering.dat";
-  char *scat1m_path = "delta_mie_scattering.dat";
-  char *irrad_path = "irradiance.dat";
-  if ((getpath(irrad_path, getrlibpath(), R_OK)) == NULL) {
-    printf("precomputing...\n");
-    if (!precompute(4)) {
-      printf("precompute failed\n");
-      return 1;
-    }
-  }
-  DATARRAY *tau_dp = getdata(tau_path);
-  DATARRAY *scat_dp = getdata(scat_path);
-  DATARRAY *scat1m_dp = getdata(scat1m_path);
-  DATARRAY *irrad_dp = getdata(irrad_path);
-  double sun_irradiance[NSSAMP] = {0};
-  Datetime dt = {0};
-  Location lc = {0};
-  Weather w = {0};
-  FVECT sundir;
-  if (!parse_options(argc, argv, &dt, &lc, &w)) {
-    exit(1);
-  }
-
-  const RayleighAtmos rayleigh_atmos = build_rayleigh_atmosphere(&dt, &lc);
-
-  // Always use the continental clean model, fix later.
-  const MieAtmos mie_atmos = {HMS_CC, HMA_CC, BM0_CC, AM0_CC, w.aod};
-
-  const Atmosphere atmos = {&rayleigh_atmos, &mie_atmos};
-
-  if (!compute_sundir(&dt, &lc, 0, sundir)) {
-    fprintf(stderr, "Cannot compute solar angle\n");
-    exit(1);
-  }
-
-  if (!gen_spect_sky(tau_dp, scat_dp, scat1m_dp, irrad_dp, sundir)) {
-    fprintf(stderr, "gen_spect_sky failed\n");
-    exit(1);
-  }
-  return 1;
-}
