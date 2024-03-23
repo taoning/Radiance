@@ -12,6 +12,9 @@ target_link_libraries(genmarble ${LIB_M})
 add_executable(gensky gensky.c sun.c)
 target_link_libraries(gensky rtrad ${LIB_M})
 
+add_executable(genssky genssky.c sun.c)
+target_link_libraries(genssky rtrad ${LIB_M})
+
 add_executable(gendaylit gendaylit.c sun.c)
 target_link_libraries(gendaylit rtrad ${LIB_M})
 
