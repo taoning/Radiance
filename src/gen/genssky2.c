@@ -23,7 +23,7 @@ typedef struct {
   DATARRAY *delta_rayleigh_scattering_dp;
   DATARRAY *delta_mie_scattering_dp;
   DATARRAY *scattering_dp;
-} scattering1_tdata;
+} Scat1Tdat;
 
 typedef struct {
   int start_l;
@@ -32,7 +32,7 @@ typedef struct {
   DATARRAY *delta_scattering_density_dp;
   DATARRAY *delta_multiple_scattering_dp;
   DATARRAY *scattering_dp;
-} nscattering_tdata;
+} ScatNTdat;
 
 typedef struct {
   int start_l;
@@ -44,7 +44,7 @@ typedef struct {
   DATARRAY *delta_irradiance_dp;
   int scattering_order;
   DATARRAY *delta_scattering_density_dp;
-} sdensity_tdata;
+} ScatDenseTdat;
 
 typedef struct {
   double r;
@@ -64,11 +64,6 @@ typedef struct {
 typedef struct {
   DensityProfileLayer layers[2];
 } DensityProfile;
-
-typedef struct {
-  double aod;
-  double ccover;
-} Weather;
 
 typedef struct {
   const double sheight;
@@ -336,7 +331,7 @@ static void compute_transmittance_to_space(const double r, const double mu,
   const double taum = compute_optical_length_to_space(&mie_density, r, mu);
   const double tauo = compute_optical_length_to_space(&ozone_density, r, mu);
   for (int i = 0; i < NSSAMP; ++i) {
-    result[i] = exp(-(taur * BR0_MW[i] + taum * BM0_CC[i] + tauo * AO0[i]));
+    result[i] = exp(-(taur * BR0_MW[i] + taum * BM0_CA[i] + tauo * AO0[i]));
   }
 }
 
@@ -514,7 +509,7 @@ static void compute_single_scattering(DATARRAY *tau_dp, const double r,
   }
   for (int i = 0; i < NSSAMP; ++i) {
     rayleigh[i] = rayleigh_sum[i] * dx * EXTSOL[i] * BR0_MW[i];
-    mie[i] = mie_sum[i] * dx * EXTSOL[i] * BM0_CC[i];
+    mie[i] = mie_sum[i] * dx * EXTSOL[i] * BM0_CA[i];
   }
 }
 
@@ -797,7 +792,7 @@ compute_scattering_density(DATARRAY *tau_dp, DATARRAY *scat1r, DATARRAY *scat1m,
       for (int j = 0; j < NSSAMP; ++j) {
         result[j] += incident_radiance[j] *
                      (BR0_MW[j] * rayleigh_density_ * rayleigh_phase +
-                      mie_density_ * mie_phase * BM0_CC[j]) *
+                      mie_density_ * mie_phase * BM0_CA[j]) *
                      domega_i;
       }
     }
@@ -1015,7 +1010,7 @@ void increment_dp(DATARRAY *dp1, DATARRAY *dp2) {
 }
 
 void *compute_scattering_density_thread(void *arg) {
-  sdensity_tdata *tdata = (sdensity_tdata *)arg;
+  ScatDenseTdat *tdata = (ScatDenseTdat *)arg;
   for (unsigned int l = tdata->start_l; l < tdata->end_l; ++l) {
     for (unsigned int k = 0; k < SCATTERING_TEXTURE_MU_SIZE; ++k) {
       for (unsigned int j = 0; j < SCATTERING_TEXTURE_MU_S_SIZE; ++j) {
@@ -1057,7 +1052,7 @@ void *compute_scattering_density_thread(void *arg) {
 }
 
 void *compute_single_scattering_thread(void *arg) {
-  scattering1_tdata *tdata = (scattering1_tdata *)arg;
+  Scat1Tdat *tdata = (Scat1Tdat *)arg;
   for (unsigned int l = tdata->start_l; l < tdata->end_l; ++l) {
     for (int k = 0; k < SCATTERING_TEXTURE_MU_SIZE; ++k) {
       for (int j = 0; j < SCATTERING_TEXTURE_MU_S_SIZE; ++j) {
@@ -1098,7 +1093,7 @@ void *compute_single_scattering_thread(void *arg) {
 }
 
 void *compute_multiple_scattering_thread(void *arg) {
-  nscattering_tdata *tdata = (nscattering_tdata *)arg;
+  ScatNTdat *tdata = (ScatNTdat *)arg;
   for (unsigned int l = tdata->start_l; l < tdata->end_l; ++l) {
     for (unsigned int k = 0; k < SCATTERING_TEXTURE_MU_SIZE; ++k) {
       for (unsigned int j = 0; j < SCATTERING_TEXTURE_MU_S_SIZE; ++j) {
@@ -1224,7 +1219,7 @@ int precompute(const int sorder, const Atmosphere *atmos, int num_threads) {
 
   printf("# Computing single scattering...\n");
   pthread_t threads[num_threads];
-  scattering1_tdata tdata[num_threads];
+  Scat1Tdat tdata[num_threads];
   for (int i = 0; i < num_threads; i++) {
     tdata[i].tau_dp = tau_dp;
     tdata[i].delta_rayleigh_scattering_dp = delta_rayleigh_scattering_dp;
@@ -1249,7 +1244,7 @@ int precompute(const int sorder, const Atmosphere *atmos, int num_threads) {
     // delta_scattering_density_texture.
     printf("# computing scattering density...\n");
     pthread_t threads[num_threads];
-    sdensity_tdata tdata[num_threads];
+    ScatDenseTdat tdata[num_threads];
     for (int i = 0; i < num_threads; i++) {
       tdata[i].tau_dp = tau_dp;
       tdata[i].delta_rayleigh_scattering_dp = delta_rayleigh_scattering_dp;
@@ -1272,7 +1267,7 @@ int precompute(const int sorder, const Atmosphere *atmos, int num_threads) {
 
     // Compute the indirect irradiance, store it in delta_irradiance_texture and
     // accumulate it in irradiance_texture_.
-    printf("computing indirect irradiance...\n");
+    printf("# Computing indirect irradiance...\n");
     idx = 0;
     for (unsigned int j = 0; j < IRRADIANCE_TEXTURE_HEIGHT; ++j) {
       for (unsigned int i = 0; i < IRRADIANCE_TEXTURE_WIDTH; ++i) {
@@ -1299,7 +1294,7 @@ int precompute(const int sorder, const Atmosphere *atmos, int num_threads) {
 
     printf("# Computing multiple scattering...\n");
     pthread_t threads2[num_threads];
-    nscattering_tdata tdata2[num_threads];
+    ScatNTdat tdata2[num_threads];
     for (int i = 0; i < num_threads; i++) {
       tdata2[i].tau_dp = tau_dp;
       tdata2[i].delta_multiple_scattering_dp = delta_multiple_scattering_dp;
@@ -1398,8 +1393,8 @@ int gen_spect_sky(DATARRAY *tau_dp, DATARRAY *scat_dp, DATARRAY *scat1m_dp,
   fputwlsplit(wvsplit, hfp);
   fputformat(SPECFMT, hfp);
   fputc('\n', hfp);
-  int yres = 64;
-  int xres = 64;
+  int yres = 32;
+  int xres = 32;
   RESOLU rs = {PIXSTANDARD, xres, yres};
   RREAL loc[2];
   double d;
@@ -1414,20 +1409,12 @@ int gen_spect_sky(DATARRAY *tau_dp, DATARRAY *scat_dp, DATARRAY *scat1m_dp,
   // setspectrsamp(CNDX, WLPART);
   for (unsigned int j = 0; j < yres; ++j) {
     for (unsigned int i = 0; i < xres; ++i) {
-      pix2loc(loc, &rs, j, i);
+      pix2loc(loc, &rs, i, j);
       d = viewray(rorg, rdir, &vw, loc[0], loc[1]);
       float trans[NSSAMP] = {0};
       SCOLOR results = {0};
       get_sky_radiance(tau_dp, scat_dp, scat1m_dp, camera, rdir, 0, sundir,
                        trans, results);
-      // Multiply by the wavelength span and reverse spectrum
-      // float temp;
-      // for (int k = 0; k < NSSAMP / 2; ++k) {
-      //   results[k] *= WVLSPAN;
-      //   temp = results[NSSAMP - 1 - k] * WVLSPAN;
-      //   results[NSSAMP - k - 1] = results[k];
-      //   results[k] = temp;
-      // }
       for (int k = 0; k < NSSAMP; ++k) {
         results[k] *= WVLSPAN;
       }
@@ -1446,14 +1433,14 @@ int gen_spect_sky(DATARRAY *tau_dp, DATARRAY *scat_dp, DATARRAY *scat1m_dp,
     sun_radiance[i] = sky_radiance_sun[i] + trans_sun[i] * EXTSOL[i] / SOLOMG;
   }
   printf("void spectrum sunrad\n0\n0\n22 380 780 ");
-  for (int i = 0; i < 20; ++i) {
+  for (int i = 0; i < NSSAMP; ++i) {
     printf("%.1f ", sun_radiance[i] * WVLSPAN);
   }
   printf("\n\nsunrad light solar\n0\n0\n3 1 1 1\n\n");
   printf("solar source sun\n0\n0\n4 %f %f %f 0.533\n\n", sundir[0], sundir[1],
          sundir[2]);
-  printf("void specpict skyfunc\n9 noop %s fisheye.cal fish_u fish_v -rx 90 "
-         "-rz -90\n0\n0\n\n",
+  printf("void specpict skyfunc\n8 noop %s fisheye.cal fish_u fish_v -rx 90 "
+         "-mx\n0\n0\n\n",
          hsrfile);
   printf("skyfunc glow sky_glow\n0\n0\n4 1 1 1 0\n\n");
   printf("sky_glow source sky\n0\n0\n4 0 0 1 180\n\n");
@@ -1562,7 +1549,7 @@ int main(int argc, char *argv[]) {
   const Atmosphere atmos = {&rayleigh_atmos, &mie_atmos};
 
   if ((getpath(scat_path, getrlibpath(), R_OK)) == NULL) {
-    printf("precomputing...\n");
+    printf("# Precomputing...\n");
     if (!precompute(4, &atmos, num_threads)) {
       printf("precompute failed\n");
       return 1;
