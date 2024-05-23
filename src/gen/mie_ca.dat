@@ -1,5 +1,8 @@
 # OPAC continental average aerosol profile
-# Mie scattering coefficients
+# Mie scattering coefficients m-1
+# Altitude 0 - 60km
+# 380nm to 780nm at 20nm interval
+# Computed using libradtrans
 2
 0 0 30 0 1000 2000 3000 4000 5000 6000 7000 8000 9000 10000 11000 12000 13000 14000 15000 16000 17000 18000 19000 20000 21000 22000 23000 24000 25000 27500 30000 32500 60000
 0 19 20
