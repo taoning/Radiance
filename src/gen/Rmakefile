@@ -16,7 +16,7 @@ INSTDIR = /usr/local/bin
 LIBDIR = /usr/local/lib/ray
 
 PROGS = genbox gensky xform genblinds genrev genworm gendaylit gendaymtx \
-		gensurf genprism replmarks mkillum mksource genclock
+		gensurf genprism replmarks mkillum mksource genclock genssky
 
 LIBFILES = illum.cal rev.cal skybright.cal surf.cal clockface.hex \
 		glaze1.cal glaze2.cal perezlum.cal perezlum_c.cal
@@ -89,8 +89,8 @@ genclock:	genclock.o
 genbranch:	genbranch.o
 	$(CC) $(CFLAGS) -o genbranch genbranch.o $(MLIB)
 
-genssky: genssky.o sun.o
-	$(CC) $(CFLAGS) -lrtrad -o genssky genssky.o sun.o ../rt/data.c $(MLIB)
+genssky:	genssky.o sun.o ../rt/data.o atmos.o
+	$(CC) $(CFLAGS) -o genssky genssky.o ../rt/data.o sun.o atmos.o -lrtrad $(MLIB)
 
 
 mksource.o:	../common/random.h ../rt/ray.h ../common/octree.h \
@@ -132,4 +132,6 @@ gendaylit.o gensky.o sun.o:	sun.h
 gendaymtx.o:	../common/platform.h ../common/rtmath.h \
 ../common/mat4.h ../common/fvect.h ../common/color.h
 
-genssky.o: ../common/rtio.h ../common/rtmath.h ../rt/data.h ../common/paths.h ../common/color.h
+genssky.o: ../common/rtio.h ../common/rtmath.h ../common/paths.h ../common/color.h
+
+atmos.o: ../common/rtio.h ../common/rtmath.h ../common/color.h ../rt/data.h sun.h
