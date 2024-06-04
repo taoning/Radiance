@@ -1,5 +1,27 @@
+
 #include "atmos.h"
 
+#if defined(_WIN32) || defined(_WIN64)
+#include <windows.h>
+#else
+#include <pthread.h>
+#endif
+
+#if defined(_WIN32) || defined(_WIN64)
+#define THREAD HANDLE
+#define CREATE_THREAD(thread, func, context)                                   \
+  ((*(thread) = CreateThread(NULL, 0, (LPTHREAD_STRAT_ROUTINE)(func),          \
+                             (context), 0, NULL)) != NULL)
+#define THREAD_RETURN DWORD WINAPI
+#define THREAD_JOIN(thread) WaitForSingleObject(thread, INFINITE)
+#define THREAD_CLOSE(thread) CloseHandle(thread)
+#else
+#define THREAD pthread_t
+#define CREATE_THREAD(thread, func, context)                                   \
+  (pthread_create((thread), NULL, (func), (context)) == 0)
+#define THREAD_RETURN void *
+#define THREAD_JOIN(thread) pthread_join(thread, NULL)
+#endif
 
 typedef struct {
   int start_l;
@@ -32,11 +54,6 @@ typedef struct {
   int scattering_order;
   DATARRAY *delta_scattering_density_dp;
 } ScatDenseTdat;
-
-typedef struct {
-  const double alpha;
-  const double beta;
-} AngstromCoefficients;
 
 const double ER = 6360000; // Earth radius in meters
 const double AR = 6420000; // Atmosphere radius in meters
@@ -90,6 +107,7 @@ const float BR0_MS[NSSAMP] = {
     1.12487269e-05, 9.72370830e-06, 8.44932642e-06, 7.37769845e-06,
     6.47116653e-06, 5.70005327e-06, 5.04091603e-06, 4.47430240e-06,
     3.98549839e-06, 3.56178512e-06, 3.19293761e-06, 2.87072599e-06};
+
 const float BR0_MW[NSSAMP] = {
     5.03857564e-05, 4.09159104e-05, 3.35832809e-05, 2.78298619e-05,
     2.32653203e-05, 1.96033395e-05, 1.66375116e-05, 1.42142496e-05,
@@ -147,7 +165,9 @@ const float AO0[NSSAMP] = {
     2.5263174e-06, 2.313507e-06,  1.727741e-06,  1.2027012e-06, 7.915902e-07,
     5.0639202e-07, 3.5285684e-07, 2.23021e-07,   1.7395638e-07, 1.5052574e-07};
 
+const float BCLOUD = 0.0039; // Water cloud scattering coefficient
 const double MIE_G = 0.7;
+const double CLOUD_G = 0.88;
 
 const int TRANSMITTANCE_TEXTURE_WIDTH = 256;
 const int TRANSMITTANCE_TEXTURE_HEIGHT = 64;
@@ -164,7 +184,6 @@ const int SCATTERING_TEXTURE_NU_SIZE = 4;
 
 const int IRRADIANCE_TEXTURE_WIDTH = 64;
 const int IRRADIANCE_TEXTURE_HEIGHT = 16;
-
 
 /* Compute mie scattering coefficient using Angstrom's formula */
 static void compute_mie_coefficients(double alpha, double beta,
@@ -216,9 +235,13 @@ static double get_layer_density(const DensityProfileLayer *layer,
 
 static double get_profile_density(const DensityProfile *profile,
                                   const double altitude) {
-  return altitude < profile->layers[0].width
-             ? get_layer_density(&(profile->layers[0]), altitude)
-             : get_layer_density(&(profile->layers[1]), altitude);
+  if (altitude < profile->layers[0].width) {
+    return get_layer_density(&(profile->layers[0]), altitude);
+  } else if (altitude < profile->layers[1].width) {
+    return get_layer_density(&(profile->layers[1]), altitude);
+  } else {
+    return get_layer_density(&(profile->layers[2]), altitude);
+  }
 }
 
 static int compute_optical_length_to_space_mie(DATARRAY *mdp, double r,
@@ -276,15 +299,18 @@ static void compute_transmittance_to_space(const Atmosphere *atmos,
   assert(mu >= -1.0 && mu <= 1.0);
   const double taur =
       compute_optical_length_to_space(&atmos->rayleigh_density, r, mu);
-  // const double taum = compute_optical_length_to_space(&atmos->mie_density, r,
-  // mu);
   double taum2[NSSAMP] = {0};
   compute_optical_length_to_space_mie(atmos->beta_m, r, mu, taum2);
+  const double tauc =
+      compute_optical_length_to_space(&atmos->cloud_density, r, mu);
   const double tauo =
       compute_optical_length_to_space(&atmos->ozone_density, r, mu);
   for (int i = 0; i < NSSAMP; ++i) {
-    result[i] = exp(-(taur * atmos->beta_r0[i] + taum2[i] * atmos->beta_scale +
-                      tauo * AO0[i]));
+    result[i] =
+        exp(-(taur * atmos->beta_r0[i] + taum2[i] * atmos->beta_scale +
+              tauc * atmos->beta_c * atmos->cloud_cover + tauo * AO0[i]));
+    // result[i] =
+    //     exp(-(taur * atmos->beta_r0[i] + taum2[i] * atmos->beta_scale + tauo * AO0[i]));
   }
 }
 
@@ -441,7 +467,8 @@ static void compute_single_scattering(const Atmosphere *atmos, DATARRAY *tau_dp,
                                       const double r, const double mu,
                                       const double mu_s, const double nu,
                                       const int ray_r_mu_intersects_ground,
-                                      float *rayleigh, float *mie) {
+                                      float *rayleigh, float *mie,
+                                      float *cloud) {
   assert(r >= ER && r <= AR);
   assert(mu >= -1.0 && mu <= 1.0);
   assert(mu_s >= -1.0 && mu_s <= 1.0);
@@ -459,6 +486,7 @@ static void compute_single_scattering(const Atmosphere *atmos, DATARRAY *tau_dp,
 
   double rayleigh_sum[NSSAMP] = {0};
   double mie_sum[NSSAMP] = {0};
+  double cloud_sum[NSSAMP] = {0};
 
   for (int i = 0; i <= nsamp; ++i) {
     const double d_i = i * dx;
@@ -476,17 +504,29 @@ static void compute_single_scattering(const Atmosphere *atmos, DATARRAY *tau_dp,
   for (int i = 0; i < NSSAMP; ++i) {
     rayleigh[i] = rayleigh_sum[i] * dx * EXTSOL[i] * atmos->beta_r0[i];
     mie[i] = mie_sum[i] * dx * EXTSOL[i] * atmos->beta_scale;
+    cloud[i] =
+        cloud_sum[i] * dx * EXTSOL[i] * atmos->beta_c * atmos->cloud_cover;
   }
 }
 
-static double rayleigh_phase_function(double nu) {
+inline static double rayleigh_phase_function(double nu) {
   double k = 3.0 / (16.0 * PI);
   return k * (1.0 + nu * nu);
 }
 
-static double mie_phase_function(double g, double nu) {
+inline static double mie_phase_function(double g, double nu) {
   double k = 3.0 / (8.0 * PI) * (1.0 - g * g) / (2.0 + g * g);
   return k * (1.0 + nu * nu) / pow(1.0 + g * g - 2.0 * g * nu, 1.5);
+}
+
+inline static double cloud_phase_function(double g, double nu) {
+  double alpha = 0.5;
+  double g1 = -0.5;
+  double k0 = 3.0 / (8.0 * PI) * (1.0 - g * g) / (2.0 + g * g);
+  double k1 = 3.0 / (8.0 * PI) * (1.0 - g1 * g1) / (2.0 + g1 * g1);
+  double hg0 = k0 * (1.0 + nu * nu) / pow(1.0 + g * g - 2.0 * g * nu, 1.5);
+  double hg1 = k1 * (1.0 + nu * nu) / pow(1.0 + g1 * g1 - 2.0 * g1 * nu, 1.5);
+  return alpha * hg0 + (1.0 - alpha) * hg1;
 }
 //
 static void to_scattering_uvwz(double r, double mu, double mu_s, double nu,
@@ -754,16 +794,22 @@ compute_scattering_density(const Atmosphere *atmos, DATARRAY *tau_dp,
       double nu2 = fdot(omega, omega_i);
       double rayleigh_density_ =
           get_profile_density(&atmos->rayleigh_density, r - ER);
+      double cloud_density_ =
+          get_profile_density(&atmos->cloud_density, r - ER);
       // double mie_density_ = get_profile_density(&atmos->mie_density, r - ER);
       DATARRAY *mie_scat;
       double pt[1] = {r - ER};
       mie_scat = datavector(atmos->beta_m, pt);
       double rayleigh_phase = rayleigh_phase_function(nu2);
       double mie_phase = mie_phase_function(MIE_G, nu2);
+      // double cloud_phase = cloud_phase_function(CLOUD_G, nu2);
+      double cloud_phase = mie_phase_function(CLOUD_G, nu2);
       for (int j = 0; j < NSSAMP; ++j) {
         result[j] += incident_radiance[j] *
                      (atmos->beta_r0[j] * rayleigh_density_ * rayleigh_phase +
-                      mie_scat->arr.d[j] * mie_phase * atmos->beta_scale) *
+                      mie_scat->arr.d[j] * mie_phase * atmos->beta_scale +
+                      atmos->beta_c * cloud_density_ * cloud_phase *
+                          atmos->cloud_cover) *
                      domega_i;
       }
       free(mie_scat);
@@ -1038,6 +1084,7 @@ THREAD_RETURN compute_single_scattering_thread(void *arg) {
         for (int i = 0; i < SCATTERING_TEXTURE_NU_SIZE; ++i) {
           float rayleigh[NSSAMP] = {0};
           float mie[NSSAMP] = {0};
+          float cloud[NSSAMP] = {0};
           double r, mu, mu_s, nu;
           int ray_r_mu_intersects_ground;
           double xr = (double)i / SCATTERING_TEXTURE_NU_SIZE;
@@ -1051,7 +1098,7 @@ THREAD_RETURN compute_single_scattering_thread(void *arg) {
           nu = fmax(mu_mu_s - sqrt_term, fmin(mu_mu_s + sqrt_term, nu));
           compute_single_scattering(tdata->atmos, tdata->tau_dp, r, mu, mu_s,
                                     nu, ray_r_mu_intersects_ground, rayleigh,
-                                    mie);
+                                    mie, cloud);
           for (int m = 0; m < NSSAMP; ++m) {
             assert(rayleigh[m] >= 0.0);
             assert(mie[m] >= 0.0);
@@ -1062,7 +1109,8 @@ THREAD_RETURN compute_single_scattering_thread(void *arg) {
                           SCATTERING_TEXTURE_NU_SIZE * NSSAMP +
                       j * SCATTERING_TEXTURE_NU_SIZE * NSSAMP + i * NSSAMP + m;
             tdata->delta_rayleigh_scattering_dp->arr.d[idx] = rayleigh[m];
-            tdata->delta_mie_scattering_dp->arr.d[idx] = mie[m];
+            // tdata->delta_mie_scattering_dp->arr.d[idx] = mie[m];
+            tdata->delta_mie_scattering_dp->arr.d[idx] = mie[m] + cloud[m];
             tdata->scattering_dp->arr.d[idx] = rayleigh[m];
           }
         }
@@ -1343,7 +1391,6 @@ int compute_sundir(const int year, const int month, const int day,
   sundir[2] = sin(altitude);
   return 1;
 }
-
 
 void get_sky_radiance(DATARRAY *tau_dp, DATARRAY *scat_dp, DATARRAY *scat1m_dp,
                       FVECT camera, FVECT view_ray, double shadow_length,

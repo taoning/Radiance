@@ -16,7 +16,7 @@ INSTDIR = /usr/local/bin
 LIBDIR = /usr/local/lib/ray
 
 PROGS = genbox gensky xform genblinds genrev genworm gendaylit gendaymtx \
-		gensurf genprism replmarks mkillum mksource genclock genssky
+		gensurf genprism replmarks mkillum mksource genclock genssky gensdaymtx
 
 LIBFILES = illum.cal rev.cal skybright.cal surf.cal clockface.hex \
 		glaze1.cal glaze2.cal perezlum.cal perezlum_c.cal
@@ -89,8 +89,13 @@ genclock:	genclock.o
 genbranch:	genbranch.o
 	$(CC) $(CFLAGS) -o genbranch genbranch.o $(MLIB)
 
+
+# Assume rt is built before this
 genssky:	genssky.o sun.o ../rt/data.o atmos.o
 	$(CC) $(CFLAGS) -o genssky genssky.o ../rt/data.o sun.o atmos.o -lrtrad $(MLIB)
+
+gensdaymtx:	gensdaymtx.o sun.o ../rt/data.o atmos.o
+	$(CC) $(CFLAGS) -o gensdaymtx gensdaymtx.o ../rt/data.o sun.o atmos.o -lrtrad $(MLIB)
 
 
 mksource.o:	../common/random.h ../rt/ray.h ../common/octree.h \

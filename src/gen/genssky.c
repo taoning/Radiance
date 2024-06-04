@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <time.h> // to be removed
 
+#include "atmos.h"
 #include "color.h"
 #include "data.h"
 #include "fvect.h"
@@ -12,39 +13,14 @@
 #include "rtmath.h"
 #include "sun.h"
 #include "view.h"
-#include "atmos.h"
-
-#if defined(_WIN32) || defined(_WIN64)
-#include <windows.h>
-#else
-#include <pthread.h>
-#endif
-
-#if defined(_WIN32) || defined(_WIN64)
-#define THREAD HANDLE
-#define CREATE_THREAD(thread, func, context)                                   \
-  ((*(thread) = CreateThread(NULL, 0, (LPTHREAD_STRAT_ROUTINE)(func),          \
-                             (context), 0, NULL)) != NULL)
-#define THREAD_RETURN DWORD WINAPI
-#define THREAD_JOIN(thread) WaitForSingleObject(thread, INFINITE)
-#define THREAD_CLOSE(thread) CloseHandle(thread)
-#else
-#define THREAD pthread_t
-#define CREATE_THREAD(thread, func, context)                                   \
-  (pthread_create((thread), NULL, (func), (context)) == 0)
-#define THREAD_RETURN void *
-#define THREAD_JOIN(thread) pthread_join(thread, NULL)
-#endif
-
-#define NSSAMP 20
 
 char *progname;
 
 int gen_spect_sky(DATARRAY *tau_dp, DATARRAY *scat_dp, DATARRAY *scat1m_dp,
-                  FVECT sundir, char *out) {
+                  FVECT sundir, char *outname) {
   FVECT camera = {0, 0, ER + 1};
   char hsrfile[256];
-  if (!snprintf(hsrfile, sizeof(hsrfile), "%s.hsr", out)) {
+  if (!snprintf(hsrfile, sizeof(hsrfile), "%s.hsr", outname)) {
     fprintf(stderr, "Error creating header file name\n");
     return 0;
   }
@@ -69,7 +45,6 @@ int gen_spect_sky(DATARRAY *tau_dp, DATARRAY *scat_dp, DATARRAY *scat1m_dp,
   setview(&vw);
   fputsresolu(&rs, hfp);
   CNDX[3] = NSSAMP;
-  // setspectrsamp(CNDX, WLPART);
   for (unsigned int j = 0; j < yres; ++j) {
     for (unsigned int i = 0; i < xres; ++i) {
       pix2loc(loc, &rs, i, j);
@@ -96,7 +71,7 @@ int gen_spect_sky(DATARRAY *tau_dp, DATARRAY *scat_dp, DATARRAY *scat1m_dp,
     sun_radiance[i] = sky_radiance_sun[i] + trans_sun[i] * EXTSOL[i] / SOLOMG;
   }
   char radfile[256];
-  if (!snprintf(radfile, sizeof(radfile), "%s.rad", out)) {
+  if (!snprintf(radfile, sizeof(radfile), "%s.rad", outname)) {
     fprintf(stderr, "Error creating rad file name\n");
     return 0;
   }
@@ -127,7 +102,7 @@ int main(int argc, char *argv[]) {
   int tsolar = 0;
   double hsm = 0.0;
   double ccover = 0.0;
-  double aod = 0.0;
+  double aod = AOD0_CA;
   char *outname = "out";
   float angs_mie[NSSAMP] = {0};
   FVECT sundir;
@@ -212,63 +187,82 @@ int main(int argc, char *argv[]) {
     is_summer = !is_summer;
   }
 
-  DensityProfile ozone_density = {.layers = {
-                                      {.width = 25000.0,
-                                       .exp_term = 0.0,
-                                       .exp_scale = 0.0,
-                                       .linear_term = 1.0 / 15000.0,
-                                       .constant_term = -2.0 / 3.0},
-                                      {.width = 0.0,
-                                       .exp_term = 0.0,
-                                       .exp_scale = 0.0,
-                                       .linear_term = -1.0 / 15000.0,
-                                       .constant_term = 8.0 / 3.0},
-                                  }};
+  Atmosphere atmos = {
+      .ozone_density = {.layers =
+                            {
+                                {.width = 25000.0,
+                                 .exp_term = 0.0,
+                                 .exp_scale = 0.0,
+                                 .linear_term = 1.0 / 15000.0,
+                                 .constant_term = -2.0 / 3.0},
+                                {.width = AH,
+                                 .exp_term = 0.0,
+                                 .exp_scale = 0.0,
+                                 .linear_term = -1.0 / 15000.0,
+                                 .constant_term = 8.0 / 3.0},
+                            }},
+      .rayleigh_density = {.layers =
+                               {
+                                   {.width = AH,
+                                    .exp_term = 1.0,
+                                    .exp_scale = -1.0 / HR_MS,
+                                    .linear_term = 0.0,
+                                    .constant_term = 0.0},
+                               }},
+      .cloud_density =
+          {
+              .layers =
+                  {
+                      {.width = 1000.0,
+                       .exp_term = 0.0,
+                       .exp_scale = 0.0,
+                       .linear_term = 0.0,
+                       .constant_term = 0.0},
+                      {.width = 1100.0,
+                       .exp_term = 0.0,
+                       .exp_scale = 0.0,
+                       .linear_term = 0.0,
+                       .constant_term = 1.0},
+                      {.width = 0.0,
+                       .exp_term = 0.0,
+                       .exp_scale = 0.0,
+                       .linear_term = 0.0,
+                       .constant_term = 0.0},
+                  },
 
-  DensityProfile rayleigh_density = {.layers = {
-                                         {.width = AH,
-                                          .exp_term = 1.0,
-                                          .exp_scale = -1.0 / HR_MS,
-                                          .linear_term = 0.0,
-                                          .constant_term = 0.0},
-                                     }};
-
-
-  Atmosphere atmos = {0};
-  atmos.ozone_density = ozone_density;
+          },
+      .beta_r0 = BR0_MS,
+      .beta_c = BCLOUD,
+      .beta_scale = aod / AOD0_CA,
+      .cloud_cover = ccover,
+      .beta_m = NULL,
+  };
 
   // RayleighAtmos rayleigh_atmos;
   if (fabs(s_latitude) > arctic_circle_latitude) {
     if (is_summer) {
-      rayleigh_density.layers[0].exp_scale = -1.0 / HR_SS;
+      atmos.rayleigh_density.layers[0].exp_scale = -1.0 / HR_SS;
       atmos.beta_r0 = BR0_SS;
     } else {
-      rayleigh_density.layers[0].exp_scale = -1.0 / HR_SW;
+      atmos.rayleigh_density.layers[0].exp_scale = -1.0 / HR_SW;
       atmos.beta_r0 = BR0_SW;
     }
   } else if (fabs(s_latitude) > tropic_latitude) {
     if (is_summer) {
-      rayleigh_density.layers[0].exp_scale = -1.0 / HR_MS;
+      atmos.rayleigh_density.layers[0].exp_scale = -1.0 / HR_MS;
       atmos.beta_r0 = BR0_MS;
     } else {
-      rayleigh_density.layers[0].exp_scale = -1.0 / HR_MW;
+      atmos.rayleigh_density.layers[0].exp_scale = -1.0 / HR_MW;
       atmos.beta_r0 = BR0_MW;
     }
   } else {
-    rayleigh_density.layers[0].exp_scale = -1.0 / HR_T;
+    atmos.rayleigh_density.layers[0].exp_scale = -1.0 / HR_T;
     atmos.beta_r0 = BR0_T;
-  }
-
-  atmos.rayleigh_density = rayleigh_density;
-  atmos.beta_scale = 1.0;
-
-  if (aod > 0) {
-    atmos.beta_scale = aod / AOD0_CA;
   }
 
   DATARRAY *mie_ca_dp = getdata(mie_ca_path);
   if (mie_ca_dp == NULL) {
-    fprintf(stderr, "Error reading mie_ca data\n");
+    fprintf(stderr, "Error reading mie data\n");
     return 0;
   }
   atmos.beta_m = mie_ca_dp;

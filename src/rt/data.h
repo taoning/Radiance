@@ -36,9 +36,9 @@ extern DATARRAY	*getdata(char *dname);
 extern DATARRAY	*getpict(char *pname);
 extern DATARRAY *getspec(char *sname);
 extern void	freedata(DATARRAY *dta);
-extern double	datavalue(DATARRAY *dp, double *pt);
+extern double	datavalue(const DATARRAY *dp, double *pt);
 /* release datavector() pointer with free() not freedata() */
-extern DATARRAY	*datavector(DATARRAY *dp, double *pt);
+extern DATARRAY	*datavector(const DATARRAY *dp, double *pt);
 
 #ifdef __cplusplus
 }

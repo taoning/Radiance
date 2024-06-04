@@ -404,7 +404,7 @@ freedata(			/* release data array reference */
 
 /* internal call to interpolate data value or vector */
 static double
-data_interp(DATARRAY *dp, double *pt, double coef, DATATYPE *rvec)
+data_interp(const DATARRAY *dp, double *pt, double coef, DATATYPE *rvec)
 {
 	DATARRAY	sd;
 	int		stride, i;
@@ -543,7 +543,7 @@ data_interp(DATARRAY *dp, double *pt, double coef, DATATYPE *rvec)
 
 double
 datavalue(		/* interpolate data value at a point */
-	DATARRAY  *dp,
+	const DATARRAY  *dp,
 	double	*pt
 )
 {
@@ -553,7 +553,7 @@ datavalue(		/* interpolate data value at a point */
 
 /* Interpolate final vector corresponding to last dimension in data array */
 DATARRAY *
-datavector(DATARRAY *dp, double *pt)
+datavector(const DATARRAY *dp, double *pt)
 {
 	DATARRAY	*newdp;
 
