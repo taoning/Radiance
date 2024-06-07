@@ -25,7 +25,7 @@ typedef struct {
 } DensityProfileLayer;
 
 typedef struct {
-  DensityProfileLayer layers[3];
+  DensityProfileLayer layers[2];
 } DensityProfile;
 
 typedef struct {
