@@ -2,6 +2,7 @@
 #define ATMOS_H
 
 #include <assert.h> // to be removed
+#include <linux/limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <time.h> // to be removed
@@ -30,14 +31,18 @@ typedef struct {
 
 typedef struct {
   DensityProfile rayleigh_density;
-  DensityProfile cloud_density;
   DensityProfile ozone_density;
   const float *beta_r0;
-  const float beta_c;
   float beta_scale;
-  float cloud_cover;
   DATARRAY *beta_m;
 } Atmosphere;
+
+typedef struct {
+  char *tau;
+  char *scat;
+  char *scat1m;
+  char *irrad;
+} DpPaths;
 
 extern const double ER;
 extern const double AH;
@@ -57,16 +62,25 @@ extern const float BCLOUD;
 extern const double AOD0_CA;
 extern const double SOLOMG;
 
-extern void get_sky_radiance(DATARRAY *tau_dp, DATARRAY *scat_dp,
-                             DATARRAY *scat1m_dp, FVECT camera, FVECT view_ray,
-                             double shadow_length, FVECT sundir,
-                             float *transmittance, float *result);
+extern void to_scattering_uvwz(double r, double mu, double mu_s, double nu,
+                               int ray_r_mu_intersects_ground, double *u,
+                               double *v, double *w, double *z);
+extern void get_rmumusnu(FVECT vpt, FVECT vdir, FVECT sundir, double *r,
+                         double *mu, double *mu_s, double *nu);
+
+extern void get_sky_transmittance(DATARRAY *tau, double r, double mu, float *result);
+
+extern void get_sky_radiance(DATARRAY *scat, DATARRAY *scat1m, double nu,
+                             double pt[4], float *result);
+
+extern void add_cloud_radiance(DATARRAY *scat, double nu, double pt[4],
+                               float *result);
 
 extern int compute_sundir(const int year, const int month, const int day,
                           const double hour, const int tsolar,
                           double sundir[3]);
 
-extern int precompute(const int sorder, const Atmosphere *atmos,
+extern int precompute(const int sorder, DpPaths *dppaths, const Atmosphere *atmos,
                       int num_threads);
 
 #endif // ATMOS_H

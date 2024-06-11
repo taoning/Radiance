@@ -1,7 +1,6 @@
 #include <assert.h> // to be removed
 #include <math.h>
 #include <stdio.h>
-#include <time.h> // to be removed
 
 #include "atmos.h"
 #include "color.h"
@@ -16,9 +15,43 @@
 
 char *progname;
 
-int gen_spect_sky(DATARRAY *tau_dp, DATARRAY *scat_dp, DATARRAY *scat1m_dp,
-                  FVECT sundir, char *outname) {
-  FVECT camera = {0, 0, ER + 1};
+const double D65EFF = 203.; /* standard illuminant D65 */
+
+// Relative daylight spectra where CCT = 6415K for overcast;
+const double D6415[NSSAMP] = {0.63231, 1.06171, 1.00779, 1.36423, 1.34133,
+                              1.27258, 1.26276, 1.26352, 1.22201, 1.13246,
+                              1.0434,  1.05547, 0.98212, 0.94445, 0.9722,
+                              0.82387, 0.87853, 0.82559, 0.75111, 0.78925};
+
+inline static double wmean2(double a, double b, double x) {
+  return a * (1 - x) + b * x;
+}
+
+inline static double wmean(double a, double x, double b, double y) {
+  return (a * x + b * y) / (a + b);
+}
+
+// from gensky.c
+static double get_overcast_brightness(const double dz, const double sundir[3]) {
+  double zenithbr;
+  if (sundir[2] < 0) {
+    zenithbr = 0;
+  } else {
+    zenithbr = (8.6 * sundir[2] + .123) * 1000.0 / D65EFF;
+  }
+  double groundbr = zenithbr * 0.777778;
+  return wmean(pow(dz + 1.01, 10), zenithbr * (1 + 2 * dz) / 3,
+               pow(dz + 1.01, -10), groundbr);
+}
+
+int gen_spect_sky(DATARRAY *tau_clear, DATARRAY *scat_clear,
+                  DATARRAY *scat1m_clear, double cloud_cover, FVECT sundir,
+                  char *outname) {
+
+  double rmu;
+  FVECT view_point = {0, 0, ER + 1};
+  double point_radius = VLEN(view_point);
+  double sun_ct = fdot(view_point, sundir) / point_radius;
   char hsrfile[256];
   if (!snprintf(hsrfile, sizeof(hsrfile), "%s.hsr", outname)) {
     fprintf(stderr, "Error creating header file name\n");
@@ -47,28 +80,52 @@ int gen_spect_sky(DATARRAY *tau_dp, DATARRAY *scat_dp, DATARRAY *scat1m_dp,
   CNDX[3] = NSSAMP;
   for (unsigned int j = 0; j < yres; ++j) {
     for (unsigned int i = 0; i < xres; ++i) {
+      double u, v, w, z;
+      double r, mu, mu_s, nu;
+      SCOLR sclr;
       pix2loc(loc, &rs, i, j);
       d = viewray(rorg, rdir, &vw, loc[0], loc[1]);
-      float trans[NSSAMP] = {0};
-      SCOLOR results = {0};
-      get_sky_radiance(tau_dp, scat_dp, scat1m_dp, camera, rdir, 0.0, sundir,
-                       trans, results);
+      rmu = fdot(view_point, rdir);
+      mu = rmu / point_radius;
+      nu = fdot(rdir, sundir);
+      to_scattering_uvwz(point_radius, mu, sun_ct, nu, 0, &u, &v, &w, &z);
+      double pt[4] = {z, w, v, u};
+      SCOLOR result = {0};
+      get_sky_radiance(scat_clear, scat1m_clear, nu, pt, result);
       for (int k = 0; k < NSSAMP; ++k) {
-        results[k] *= WVLSPAN;
+        result[k] *= WVLSPAN;
       }
-      SCOLR sclr;
-      scolor2scolr(sclr, results, 20);
+      if (cloud_cover > 0) {
+        double skybr = get_overcast_brightness(rdir[2], sundir);
+        for (int k = 0; k < NSSAMP; ++k) {
+          result[k] = wmean2(result[k], skybr * D6415[k], cloud_cover);
+        }
+      }
+      scolor2scolr(sclr, result, 20);
       putbinary(sclr, LSCOLR, 1, hfp);
     }
   }
   fclose(hfp);
+
+  // Get solar radiance
+  double nus = fdot(sundir, sundir);
+  double us, vs, ws, zs;
+  to_scattering_uvwz(point_radius, sun_ct, sun_ct, nus, 0, &us, &vs, &ws, &zs);
+  double pts[4] = {zs, ws, vs, us};
   float trans_sun[NSSAMP] = {0};
   float sky_radiance_sun[NSSAMP] = {0};
-  get_sky_radiance(tau_dp, scat_dp, scat1m_dp, camera, sundir, 0, sundir,
-                   trans_sun, sky_radiance_sun);
+  get_sky_transmittance(tau_clear, point_radius, sun_ct, trans_sun);
+  get_sky_radiance(scat_clear, scat1m_clear, nus, pts, sky_radiance_sun);
   double sun_radiance[NSSAMP] = {0};
   for (int i = 0; i < NSSAMP; ++i) {
     sun_radiance[i] = sky_radiance_sun[i] + trans_sun[i] * EXTSOL[i] / SOLOMG;
+  }
+  if (cloud_cover > 0) {
+    double skybr = get_overcast_brightness(sundir[2], sundir);
+    for (int i = 0; i < NSSAMP; ++i) {
+      sun_radiance[i] =
+          wmean2(sun_radiance[i], D6415[i] * skybr / WVLSPAN, cloud_cover);
+    }
   }
   char radfile[256];
   if (!snprintf(radfile, sizeof(radfile), "%s.rad", outname)) {
@@ -94,30 +151,29 @@ int gen_spect_sky(DATARRAY *tau_dp, DATARRAY *scat_dp, DATARRAY *scat1m_dp,
 
 int main(int argc, char *argv[]) {
   progname = argv[0];
+  const double arctic_circle_latitude = 67.;
+  const double tropic_latitude = 23.;
+  const int summer_start_month = 4;
+  const int summer_end_month = 9;
   int month, day;
+  double hour;
+  FVECT sundir;
   int num_threads = 1;
   int sorder = 4;
   int year = 0;
-  double hour;
   int tsolar = 0;
   double hsm = 0.0;
   double ccover = 0.0;
   double aod = AOD0_CA;
   char *outname = "out";
-  float angs_mie[NSSAMP] = {0};
-  FVECT sundir;
+  char dirname[PATH_MAX];
+  snprintf(dirname, sizeof(dirname), "ssky_%f", aod);
   char *mie_ca_path = getpath("mie_ca.dat", getrlibpath(), R_OK);
-  char *tau_path = "ssky_transmittance.dat";
-  char *scat_path = "ssky_scattering.dat";
-  char *scat1m_path = "ssky_delta_mie_scattering.dat";
-  char *irrad_path = "ssky_irradiance.dat";
-  if (argc < 4) {
+
+  if (argc < 5) {
     fprintf(stderr, "Usage: %s month day hour -y year -a lat -o lon -m tz\n",
             argv[0]);
     return 0;
-  }
-  if (argc == 4) {
-    return 1;
   }
   if (!strcmp(argv[1], "-ang")) {
     float altitude = atof(argv[2]) * (M_PI / 180);
@@ -175,11 +231,6 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  const double arctic_circle_latitude = 67;
-  const double tropic_latitude = 23;
-  const int summer_start_month = 4;
-  const int summer_end_month = 9;
-
   // Determine if it's summer for the given hemisphere
   int is_northern_hemisphere = (s_latitude >= 0);
   int is_summer = (month >= summer_start_month && month <= summer_end_month);
@@ -187,7 +238,7 @@ int main(int argc, char *argv[]) {
     is_summer = !is_summer;
   }
 
-  Atmosphere atmos = {
+  Atmosphere clear_atmos = {
       .ozone_density = {.layers =
                             {
                                 {.width = 25000.0,
@@ -209,83 +260,73 @@ int main(int argc, char *argv[]) {
                                     .linear_term = 0.0,
                                     .constant_term = 0.0},
                                }},
-      .cloud_density =
-          {
-              .layers =
-                  {
-                      {.width = 1000.0,
-                       .exp_term = 0.0,
-                       .exp_scale = 0.0,
-                       .linear_term = 0.0,
-                       .constant_term = 1.0},
-                      {.width = AH,
-                       .exp_term = 0.0,
-                       .exp_scale = 0.0,
-                       .linear_term = 0.0,
-                       .constant_term = 0.0},
-                  },
-
-          },
       .beta_r0 = BR0_MS,
-      .beta_c = BCLOUD,
       .beta_scale = aod / AOD0_CA,
-      .cloud_cover = ccover,
       .beta_m = NULL,
   };
 
-  // RayleighAtmos rayleigh_atmos;
+  // Set rayleigh density profile
   if (fabs(s_latitude) > arctic_circle_latitude) {
     if (is_summer) {
-      atmos.rayleigh_density.layers[0].exp_scale = -1.0 / HR_SS;
-      atmos.beta_r0 = BR0_SS;
+      clear_atmos.rayleigh_density.layers[0].exp_scale = -1.0 / HR_SS;
+      clear_atmos.beta_r0 = BR0_SS;
     } else {
-      atmos.rayleigh_density.layers[0].exp_scale = -1.0 / HR_SW;
-      atmos.beta_r0 = BR0_SW;
+      clear_atmos.rayleigh_density.layers[0].exp_scale = -1.0 / HR_SW;
+      clear_atmos.beta_r0 = BR0_SW;
     }
   } else if (fabs(s_latitude) > tropic_latitude) {
     if (is_summer) {
-      atmos.rayleigh_density.layers[0].exp_scale = -1.0 / HR_MS;
-      atmos.beta_r0 = BR0_MS;
+      clear_atmos.rayleigh_density.layers[0].exp_scale = -1.0 / HR_MS;
+      clear_atmos.beta_r0 = BR0_MS;
     } else {
-      atmos.rayleigh_density.layers[0].exp_scale = -1.0 / HR_MW;
-      atmos.beta_r0 = BR0_MW;
+      clear_atmos.rayleigh_density.layers[0].exp_scale = -1.0 / HR_MW;
+      clear_atmos.beta_r0 = BR0_MW;
     }
   } else {
-    atmos.rayleigh_density.layers[0].exp_scale = -1.0 / HR_T;
-    atmos.beta_r0 = BR0_T;
+    clear_atmos.rayleigh_density.layers[0].exp_scale = -1.0 / HR_T;
+    clear_atmos.beta_r0 = BR0_T;
   }
 
+  // Load mie density data
   DATARRAY *mie_ca_dp = getdata(mie_ca_path);
   if (mie_ca_dp == NULL) {
     fprintf(stderr, "Error reading mie data\n");
     return 0;
   }
-  atmos.beta_m = mie_ca_dp;
+  clear_atmos.beta_m = mie_ca_dp;
 
-  if ((getpath(scat_path, getrlibpath(), R_OK)) == NULL) {
+  DpPaths clear_paths = {
+      .tau = "tau_clear.dat",
+      .scat = "scat_clear.dat",
+      .scat1m = "scat1m_clear.dat",
+      .irrad = "irrad_clear.dat",
+  };
+
+  if (getpath(clear_paths.tau, getrlibpath(), R_OK) == NULL ||
+      getpath(clear_paths.scat, getrlibpath(), R_OK) == NULL ||
+      getpath(clear_paths.scat1m, getrlibpath(), R_OK) == NULL ||
+      getpath(clear_paths.irrad, getrlibpath(), R_OK) == NULL) {
     printf("# Precomputing...\n");
-    if (!precompute(sorder, &atmos, num_threads)) {
-      printf("precompute failed\n");
+    if (!precompute(sorder, &clear_paths, &clear_atmos, num_threads)) {
+      printf("Clear precompute failed\n");
       return 0;
     }
   }
-  DATARRAY *tau_dp = getdata(tau_path);
-  DATARRAY *scat_dp = getdata(scat_path);
-  DATARRAY *scat1m_dp = getdata(scat1m_path);
-  if (tau_dp == NULL || scat_dp == NULL || scat1m_dp == NULL) {
-    fprintf(stderr, "Error reading transmittance data\n");
-    return 0;
-  }
 
-  if (!gen_spect_sky(tau_dp, scat_dp, scat1m_dp, sundir, outname)) {
+  DATARRAY *tau_clear_dp = getdata(clear_paths.tau);
+  DATARRAY *scat_clear_dp = getdata(clear_paths.scat);
+  DATARRAY *scat1m_clear_dp = getdata(clear_paths.scat1m);
+
+  if (!gen_spect_sky(tau_clear_dp, scat_clear_dp, scat1m_clear_dp, ccover,
+                     sundir, outname)) {
     fprintf(stderr, "gen_spect_sky failed\n");
     exit(1);
   }
 
   freedata(mie_ca_dp);
-  freedata(tau_dp);
-  freedata(scat_dp);
-  freedata(scat1m_dp);
+  freedata(tau_clear_dp);
+  freedata(scat_clear_dp);
+  freedata(scat1m_clear_dp);
 
   return 1;
 }
