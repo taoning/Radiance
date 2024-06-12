@@ -387,7 +387,7 @@ static void get_transmittance(DATARRAY *tau_dp, double r, double mu, double d,
   free(result2);
 }
 
-static void get_transmittance_to_sun(DATARRAY *tau_dp, const double r,
+void get_transmittance_to_sun(DATARRAY *tau_dp, const double r,
                                      const double mu_s, double *result) {
   double sin_theta_h = ER / r;
   double cos_theta_h = -sqrt(fmax(1.0 - sin_theta_h * sin_theta_h, 0.0));
@@ -663,7 +663,7 @@ static void from_irradiance_uv(const double u, const double v, double *r,
   *mu_s = clamp_cosine(x_mu_s * 2.0 - 1.0);
 }
 
-static DATARRAY *get_irradiance(DATARRAY *dp, const double r,
+DATARRAY *get_irradiance(DATARRAY *dp, const double r,
                                 const double mu_s) {
   double u, v;
   to_irradiance_uv(r, mu_s, &u, &v);

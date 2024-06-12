@@ -149,6 +149,30 @@ int gen_spect_sky(DATARRAY *tau_clear, DATARRAY *scat_clear,
   return 1;
 }
 
+int get_ground_description(DATARRAY *tau_clear, DATARRAY *irrad, FVECT sundir, double grefl, char *outname) {
+  FVECT view_point = {0, 0, ER + 1};
+  const double point_radius = VLEN(view_point);
+  const double sun_ct = fdot(view_point, sundir) / point_radius;
+  DATARRAY *indirect_irradiance = get_irradiance(irrad, point_radius, sun_ct);
+  double trans_sun[NSSAMP] = {0};
+  get_transmittance_to_sun(tau_clear, point_radius, sun_ct, trans_sun);
+  double irradiance[NSSAMP] = {0};
+  for (int i = 0; i < NSSAMP; ++i) {
+    irradiance[i] = indirect_irradiance->arr.d[i] + trans_sun[i] * EXTSOL[i] * sundir[2];
+  }
+
+  FILE *rfp = fopen(outname, "a");
+  fprintf(rfp, "void spectrum groundbright\n0\n0\n22 380 780 ");
+  for (int i = 0; i < NSSAMP; ++i) {
+    fprintf(rfp, "%.1f ", irradiance[i] * grefl * WVLSPAN / M_PI);
+  }
+  fprintf(rfp, "\n\ngroundbright glow ground_glow\n0\n0\n4 1 1 1 0\n\n");
+  fprintf(rfp, "ground_glow source ground_source\n0\n0\n4 0 0 -1 180\n\n");
+  fclose(rfp);
+  free(indirect_irradiance);
+  return 1;
+}
+
 int main(int argc, char *argv[]) {
   progname = argv[0];
   const double arctic_circle_latitude = 67.;
@@ -162,7 +186,7 @@ int main(int argc, char *argv[]) {
   int sorder = 4;
   int year = 0;
   int tsolar = 0;
-  double hsm = 0.0;
+  double grefl = 0.2;
   double ccover = 0.0;
   double aod = AOD0_CA;
   char *outname = "out";
@@ -197,8 +221,8 @@ int main(int argc, char *argv[]) {
       case 'a':
         s_latitude = atof(argv[++i]) * (PI / 180.0);
         break;
-      case 'b':
-        hsm = atof(argv[++i]);
+      case 'g':
+        grefl = atof(argv[++i]);
         break;
       case 'c':
         ccover = atof(argv[++i]);
@@ -314,11 +338,24 @@ int main(int argc, char *argv[]) {
   }
 
   DATARRAY *tau_clear_dp = getdata(clear_paths.tau);
+  DATARRAY *irrad_clear_dp = getdata(clear_paths.irrad);
   DATARRAY *scat_clear_dp = getdata(clear_paths.scat);
   DATARRAY *scat1m_clear_dp = getdata(clear_paths.scat1m);
 
+  char radfile[256];
+  if (!snprintf(radfile, sizeof(radfile), "%s.rad", outname)) {
+    fprintf(stderr, "Error creating rad file name\n");
+    return 0;
+  }
+
   if (!gen_spect_sky(tau_clear_dp, scat_clear_dp, scat1m_clear_dp, ccover,
-                     sundir, outname)) {
+                     sundir, radfile)) {
+    fprintf(stderr, "gen_spect_sky failed\n");
+    exit(1);
+  }
+
+  if (!get_ground_description(tau_clear_dp, irrad_clear_dp,
+                     sundir, grefl, radfile)) {
     fprintf(stderr, "gen_spect_sky failed\n");
     exit(1);
   }
@@ -326,6 +363,7 @@ int main(int argc, char *argv[]) {
   freedata(mie_ca_dp);
   freedata(tau_clear_dp);
   freedata(scat_clear_dp);
+  freedata(irrad_clear_dp);
   freedata(scat1m_clear_dp);
 
   return 1;

@@ -68,6 +68,11 @@ extern void to_scattering_uvwz(double r, double mu, double mu_s, double nu,
 extern void get_rmumusnu(FVECT vpt, FVECT vdir, FVECT sundir, double *r,
                          double *mu, double *mu_s, double *nu);
 
+extern void get_transmittance_to_sun(DATARRAY *tau_dp, const double r,
+                                     const double mu_s, double *result);
+
+extern DATARRAY *get_irradiance(DATARRAY *irrad, double r, double mu);
+
 extern void get_sky_transmittance(DATARRAY *tau, double r, double mu, float *result);
 
 extern void get_sky_radiance(DATARRAY *scat, DATARRAY *scat1m, double nu,
