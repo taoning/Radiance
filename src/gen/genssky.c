@@ -1,4 +1,7 @@
-#include <assert.h> // to be removed
+// Main function for generate spectral sky
+// Cloudy sky computed as weight average of clear and cie overcast sky
+
+#include <linux/limits.h>
 #include <math.h>
 #include <stdio.h>
 
@@ -31,95 +34,152 @@ inline static double wmean(double a, double x, double b, double y) {
   return (a * x + b * y) / (a + b);
 }
 
-// from gensky.c
-static double get_overcast_brightness(const double dz, const double sundir[3]) {
+static double get_zenith_brightness(const double sundir[3]) {
   double zenithbr;
   if (sundir[2] < 0) {
     zenithbr = 0;
   } else {
     zenithbr = (8.6 * sundir[2] + .123) * 1000.0 / D65EFF;
   }
+  return zenithbr;
+}
+
+// from gensky.c
+static double get_overcast_brightness(const double dz, const double sundir[3]) {
+  double zenithbr = get_zenith_brightness(sundir);
   double groundbr = zenithbr * 0.777778;
   return wmean(pow(dz + 1.01, 10), zenithbr * (1 + 2 * dz) / 3,
                pow(dz + 1.01, -10), groundbr);
 }
 
-int gen_spect_sky(DATARRAY *tau_clear, DATARRAY *scat_clear,
-                  DATARRAY *scat1m_clear, double cloud_cover, FVECT sundir,
-                  char *outname) {
+static void write_rad_file(FILE *fp, const double *sun_radiance, const FVECT sundir, const char skyfile[PATH_MAX], const char grndfile[PATH_MAX]) {
+  fprintf(fp, "void spectrum sunrad\n0\n0\n22 380 780 ");
+  for (int i = 0; i < NSSAMP; ++i) {
+    fprintf(fp, "%.1f ", sun_radiance[i] * WVLSPAN);
+  }
+  fprintf(fp, "\n\nsunrad light solar\n0\n0\n3 1 1 1\n\n");
+  fprintf(fp, "solar source sun\n0\n0\n4 %f %f %f 0.533\n\n", sundir[0],
+          sundir[1], sundir[2]);
+  fprintf(fp,
+          "void specpict skyfunc\n8 noop %s fisheye.cal fish_u fish_v -rx 90 "
+          "-mx\n0\n0\n\n",
+          skyfile);
+  fprintf(fp, "skyfunc glow sky_glow\n0\n0\n4 1 1 1 0\n\n");
+  fprintf(fp, "sky_glow source sky\n0\n0\n4 0 0 1 180\n\n");
 
-  double rmu;
-  FVECT view_point = {0, 0, ER + 1};
-  double point_radius = VLEN(view_point);
-  double sun_ct = fdot(view_point, sundir) / point_radius;
-  char hsrfile[256];
-  if (!snprintf(hsrfile, sizeof(hsrfile), "%s.hsr", outname)) {
-    fprintf(stderr, "Error creating header file name\n");
+  fprintf(fp,
+          "void specpict grndmap\n8 noop %s fisheye.cal fish_u fish_v -rx -90 "
+          "-mx\n0\n0\n\n",
+          grndfile);
+  fprintf(fp, "grndmap glow ground_glow\n0\n0\n4 1 1 1 0\n\n");
+  fprintf(fp, "ground_glow source ground_source\n0\n0\n4 0 0 -1 180\n\n");
+}
+
+
+static void write_hsr_header(FILE *fp, RESOLU *res) {
+  float wvsplit[4] = {380, 480, 588, 780}; // RGB wavelength limits+partitions (nm)
+  newheader("RADIANCE", fp);
+  fputncomp(NSSAMP, fp);
+  fputwlsplit(wvsplit, fp);
+  fputformat(SPECFMT, fp);
+  fputc('\n', fp);
+  fputsresolu(res, fp);
+}
+
+int gen_spect_sky(DATARRAY *tau_clear, DATARRAY *scat_clear,
+                  DATARRAY *scat1m_clear, DATARRAY *irrad_clear, 
+                  const double cloud_cover, const FVECT sundir, 
+                  const double grefl, const int res, const char *outname) {
+
+  char radfile[PATH_MAX];
+  char skyfile[PATH_MAX];
+  char grndfile[PATH_MAX];
+  if (!snprintf(radfile, sizeof(radfile), "%s.rad", outname)) {
+    fprintf(stderr, "Error setting rad file name\n");
+    return 0;
+  };
+  if (!snprintf(skyfile, sizeof(skyfile), "%s_sky.hsr", outname)) {
+    fprintf(stderr, "Error setting sky file name\n");
+    return 0;
+  };
+  if (!snprintf(grndfile, sizeof(grndfile), "%s_ground.hsr", outname)) {
+    fprintf(stderr, "Error setting ground file name\n");
     return 0;
   }
-  FILE *hfp = fopen(hsrfile, "w");
-  float wvsplit[4] = {380, 480, 588,
-                      780}; /* RGB wavelength limits+partitions (nm) */
-  newheader("RADIANCE", hfp);
-  fputncomp(NSSAMP, hfp);
-  fputwlsplit(wvsplit, hfp);
-  fputformat(SPECFMT, hfp);
-  fputc('\n', hfp);
-  int yres = 32;
-  int xres = 32;
-  RESOLU rs = {PIXSTANDARD, xres, yres};
-  RREAL loc[2];
-  double d;
-  FVECT rorg = {0};
-  FVECT rdir = {0};
+  RESOLU rs = {PIXSTANDARD, res, res};
+  FILE *skyfp = fopen(skyfile, "w");
+  FILE *grndfp = fopen(grndfile, "w");
+  write_hsr_header(grndfp, &rs);
+  write_hsr_header(skyfp, &rs);
   VIEW vw = {VT_ANG, {0., 0., 0.}, {0., 0., 1.}, {0., 1., 0.}, 1.,
              180.,   180.,         0.,           0.,           0.,
              0.,     {0., 0., 0.}, {0., 0., 0.}, 0.,           0.};
+  VIEW vw2 = {VT_ANG, {0., 0., 0.}, {0., 0., -1.}, {0., 1., 0.}, 1.,
+             180.,   180.,         0.,           0.,           0.,
+             0.,     {0., 0., 0.}, {0., 0., 0.}, 0.,           0.};
   setview(&vw);
-  fputsresolu(&rs, hfp);
+  setview(&vw2);
+
   CNDX[3] = NSSAMP;
-  for (unsigned int j = 0; j < yres; ++j) {
-    for (unsigned int i = 0; i < xres; ++i) {
-      double u, v, w, z;
-      double r, mu, mu_s, nu;
-      SCOLR sclr;
+
+  FVECT view_point = {0, 0, ER+100};
+  double radius = VLEN(view_point);
+  double sun_ct = fdot(view_point, sundir) / radius;
+  for (unsigned int j = 0; j < res; ++j) {
+    for (unsigned int i = 0; i < res; ++i) {
+      RREAL loc[2];
+      double u, v, w, z, mu, nu, mu2, nu2;
+      double d, d2;
+      FVECT rorg = {0};
+      FVECT rdir = {0};
+      FVECT rdir2 = {0};
+      SCOLOR sky_radiance = {0};
+      SCOLOR ground_radiance = {0};
+      SCOLR sky_sclr;
+      SCOLR ground_sclr;
+
       pix2loc(loc, &rs, i, j);
       d = viewray(rorg, rdir, &vw, loc[0], loc[1]);
-      rmu = fdot(view_point, rdir);
-      mu = rmu / point_radius;
+      d2 = viewray(rorg, rdir2, &vw2, loc[0], loc[1]);
+      mu = fdot(view_point, rdir) / radius;
+      mu2 = fdot(view_point, rdir2) / radius;
       nu = fdot(rdir, sundir);
-      to_scattering_uvwz(point_radius, mu, sun_ct, nu, 0, &u, &v, &w, &z);
+      nu2 = fdot(rdir2, sundir);
+      to_scattering_uvwz(radius, mu, sun_ct, nu, 0, &u, &v, &w, &z);
       double pt[4] = {z, w, v, u};
-      SCOLOR result = {0};
-      get_sky_radiance(scat_clear, scat1m_clear, nu, pt, result);
+
+      get_sky_radiance(scat_clear, scat1m_clear, nu, pt, sky_radiance);
+      get_ground_radiance(tau_clear, scat_clear, scat1m_clear, irrad_clear, 
+                          view_point, rdir2, radius, mu2, sun_ct, nu2,
+                          grefl, sundir, ground_radiance);
+
       for (int k = 0; k < NSSAMP; ++k) {
-        result[k] *= WVLSPAN;
+        sky_radiance[k] *= WVLSPAN;
+        ground_radiance[k] *= WVLSPAN;
       }
+
       if (cloud_cover > 0) {
         double skybr = get_overcast_brightness(rdir[2], sundir);
+        double grndbr = get_zenith_brightness(sundir) * 0.777778;
         for (int k = 0; k < NSSAMP; ++k) {
-          result[k] = wmean2(result[k], skybr * D6415[k], cloud_cover);
+          sky_radiance[k] = wmean2(sky_radiance[k], skybr * D6415[k], cloud_cover);
+          ground_radiance[k] = wmean2(ground_radiance[k], grndbr * D6415[k], cloud_cover);
         }
       }
-      scolor2scolr(sclr, result, 20);
-      putbinary(sclr, LSCOLR, 1, hfp);
+
+      scolor2scolr(sky_sclr, sky_radiance, 20);
+      putbinary(sky_sclr, LSCOLR, 1, skyfp);
+
+      scolor2scolr(ground_sclr, ground_radiance, 20);
+      putbinary(ground_sclr, LSCOLR, 1, grndfp);
     }
   }
-  fclose(hfp);
+  fclose(skyfp);
+  fclose(grndfp);
 
   // Get solar radiance
-  double nus = fdot(sundir, sundir);
-  double us, vs, ws, zs;
-  to_scattering_uvwz(point_radius, sun_ct, sun_ct, nus, 0, &us, &vs, &ws, &zs);
-  double pts[4] = {zs, ws, vs, us};
-  float trans_sun[NSSAMP] = {0};
-  float sky_radiance_sun[NSSAMP] = {0};
-  get_sky_transmittance(tau_clear, point_radius, sun_ct, trans_sun);
-  get_sky_radiance(scat_clear, scat1m_clear, nus, pts, sky_radiance_sun);
   double sun_radiance[NSSAMP] = {0};
-  for (int i = 0; i < NSSAMP; ++i) {
-    sun_radiance[i] = sky_radiance_sun[i] + trans_sun[i] * EXTSOL[i] / SOLOMG;
-  }
+  get_solar_radiance(tau_clear, scat_clear, scat1m_clear, sundir, radius, sun_ct, sun_radiance);
   if (cloud_cover > 0) {
     double skybr = get_overcast_brightness(sundir[2], sundir);
     for (int i = 0; i < NSSAMP; ++i) {
@@ -127,51 +187,13 @@ int gen_spect_sky(DATARRAY *tau_clear, DATARRAY *scat_clear,
           wmean2(sun_radiance[i], D6415[i] * skybr / WVLSPAN, cloud_cover);
     }
   }
-  char radfile[256];
-  if (!snprintf(radfile, sizeof(radfile), "%s.rad", outname)) {
-    fprintf(stderr, "Error creating rad file name\n");
-    return 0;
-  }
+
   FILE *rfp = fopen(radfile, "w");
-  fprintf(rfp, "void spectrum sunrad\n0\n0\n22 380 780 ");
-  for (int i = 0; i < NSSAMP; ++i) {
-    fprintf(rfp, "%.1f ", sun_radiance[i] * WVLSPAN);
-  }
-  fprintf(rfp, "\n\nsunrad light solar\n0\n0\n3 1 1 1\n\n");
-  fprintf(rfp, "solar source sun\n0\n0\n4 %f %f %f 0.533\n\n", sundir[0],
-          sundir[1], sundir[2]);
-  fprintf(rfp,
-          "void specpict skyfunc\n8 noop %s fisheye.cal fish_u fish_v -rx 90 "
-          "-mx\n0\n0\n\n",
-          hsrfile);
-  fprintf(rfp, "skyfunc glow sky_glow\n0\n0\n4 1 1 1 0\n\n");
-  fprintf(rfp, "sky_glow source sky\n0\n0\n4 0 0 1 180\n\n");
-  return 1;
-}
-
-int get_ground_description(DATARRAY *tau_clear, DATARRAY *irrad, FVECT sundir, double grefl, char *outname) {
-  FVECT view_point = {0, 0, ER + 1};
-  const double point_radius = VLEN(view_point);
-  const double sun_ct = fdot(view_point, sundir) / point_radius;
-  DATARRAY *indirect_irradiance = get_irradiance(irrad, point_radius, sun_ct);
-  double trans_sun[NSSAMP] = {0};
-  get_transmittance_to_sun(tau_clear, point_radius, sun_ct, trans_sun);
-  double irradiance[NSSAMP] = {0};
-  for (int i = 0; i < NSSAMP; ++i) {
-    irradiance[i] = indirect_irradiance->arr.d[i] + trans_sun[i] * EXTSOL[i] * sundir[2];
-  }
-
-  FILE *rfp = fopen(outname, "a");
-  fprintf(rfp, "void spectrum groundbright\n0\n0\n22 380 780 ");
-  for (int i = 0; i < NSSAMP; ++i) {
-    fprintf(rfp, "%.1f ", irradiance[i] * grefl * WVLSPAN / M_PI);
-  }
-  fprintf(rfp, "\n\ngroundbright glow ground_glow\n0\n0\n4 1 1 1 0\n\n");
-  fprintf(rfp, "ground_glow source ground_source\n0\n0\n4 0 0 -1 180\n\n");
+  write_rad_file(rfp, sun_radiance, sundir, skyfile, grndfile);
   fclose(rfp);
-  free(indirect_irradiance);
   return 1;
 }
+
 
 int main(int argc, char *argv[]) {
   progname = argv[0];
@@ -188,6 +210,7 @@ int main(int argc, char *argv[]) {
   int tsolar = 0;
   double grefl = 0.2;
   double ccover = 0.0;
+  int res = 32;
   double aod = AOD0_CA;
   char *outname = "out";
   char dirname[PATH_MAX];
@@ -245,8 +268,11 @@ int main(int argc, char *argv[]) {
       case 'y':
         year = atoi(argv[++i]);
         break;
-      case 'r':
+      case 'f':
         outname = argv[++i];
+        break;
+      case 'r':
+        res = atoi(argv[++i]);
         break;
       default:
         fprintf(stderr, "Unknown option %s\n", argv[i]);
@@ -342,20 +368,8 @@ int main(int argc, char *argv[]) {
   DATARRAY *scat_clear_dp = getdata(clear_paths.scat);
   DATARRAY *scat1m_clear_dp = getdata(clear_paths.scat1m);
 
-  char radfile[256];
-  if (!snprintf(radfile, sizeof(radfile), "%s.rad", outname)) {
-    fprintf(stderr, "Error creating rad file name\n");
-    return 0;
-  }
 
-  if (!gen_spect_sky(tau_clear_dp, scat_clear_dp, scat1m_clear_dp, ccover,
-                     sundir, radfile)) {
-    fprintf(stderr, "gen_spect_sky failed\n");
-    exit(1);
-  }
-
-  if (!get_ground_description(tau_clear_dp, irrad_clear_dp,
-                     sundir, grefl, radfile)) {
+  if (!gen_spect_sky(tau_clear_dp, scat_clear_dp, scat1m_clear_dp, irrad_clear_dp, ccover, sundir, grefl, res, outname)) {
     fprintf(stderr, "gen_spect_sky failed\n");
     exit(1);
   }

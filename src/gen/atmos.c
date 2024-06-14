@@ -1,6 +1,7 @@
 
 #include "atmos.h"
 #include "data.h"
+#include <math.h>
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <windows.h>
@@ -56,7 +57,7 @@ typedef struct {
   DATARRAY *delta_scattering_density_dp;
 } ScatDenseTdat;
 
-const double ER = 6360000; // Earth radius in meters
+const double ER = 6360000.0; // Earth radius in meters
 const double AR = 6420000; // Atmosphere radius in meters
 const double AH = 60000;   // Atmosphere thickness in meters
 
@@ -324,6 +325,8 @@ static void to_transmittance_uv(const double r, const double mu, double *u,
   double x_r = rho / H;
   *u = fmax(0.0, fmin(1.0, x_mu));
   *v = fmax(0.0, fmin(1.0, x_r));
+  // *u = 0.5 / 256 + x_mu * (1.0 - 1.0 / 256);
+  // *v = 0.5 / 64 + x_r * (1.0 - 1.0 / 64);
 }
 
 static void from_transmittance_uv(const double u, const double v, double *r,
@@ -359,19 +362,18 @@ static DATARRAY *get_transmittance_to_space(DATARRAY *dp, const double r,
 }
 
 static void get_transmittance(DATARRAY *tau_dp, double r, double mu, double d,
-                              int ray_r_mu_intersects_ground, double *result) {
+                              int intersects_ground, double *result) {
   assert(r >= ER && r <= AR);
   assert(mu >= -1.0 && mu <= 1.0);
   assert(d >= 0.0);
 
   DATARRAY *result1;
   DATARRAY *result2;
-  double v;
 
   double r_d = clamp_radius(sqrt(d * d + 2.0 * r * mu * d + r * r));
   double mu_d = clamp_cosine((r * mu + d) / r_d);
 
-  if (ray_r_mu_intersects_ground) {
+  if (intersects_ground) {
     result1 = get_transmittance_to_space(tau_dp, r_d, -mu_d);
     result2 = get_transmittance_to_space(tau_dp, r, -mu);
   } else {
@@ -784,7 +786,7 @@ compute_scattering_density(const Atmosphere *atmos, DATARRAY *tau_dp,
   }
 }
 
-static void compute_multiple_scattering(DATARRAY *tau_dp,
+static void compute_multi_scattering(DATARRAY *tau_dp,
                                         DATARRAY *scattering_density_dp,
                                         const double r, const double mu,
                                         const double mu_s, const double nu,
@@ -1085,7 +1087,7 @@ THREAD_RETURN compute_single_scattering_thread(void *arg) {
   return 0;
 }
 
-THREAD_RETURN compute_multiple_scattering_thread(void *arg) {
+THREAD_RETURN compute_multi_scattering_thread(void *arg) {
   ScatNTdat *tdata = (ScatNTdat *)arg;
   for (unsigned int l = tdata->start_l; l < tdata->end_l; ++l) {
     for (unsigned int k = 0; k < SCATTERING_TEXTURE_MU_SIZE; ++k) {
@@ -1103,7 +1105,7 @@ THREAD_RETURN compute_multiple_scattering_thread(void *arg) {
           double mu_mu_s = mu * mu_s;
           double sqrt_term = sqrt((1.0 - mu * mu) * (1.0 - mu_s * mu_s));
           nu = fmax(mu_mu_s - sqrt_term, fmin(mu_mu_s + sqrt_term, nu));
-          compute_multiple_scattering(
+          compute_multi_scattering(
               tdata->tau_dp, tdata->delta_scattering_density_dp, r, mu, mu_s,
               nu, ray_r_mu_intersects_ground, delta_multiple_scattering);
           double rayleigh_phase = rayleigh_phase_function(nu);
@@ -1303,7 +1305,7 @@ int precompute(const int sorder, DpPaths *dppaths, const Atmosphere *atmos,
       tdata2[i].end_l = (i + 1) * tchunk;
       if (i == num_threads - 1)
         tdata2[i].end_l += tremainder;
-      CREATE_THREAD(&threads2[i], compute_multiple_scattering_thread,
+      CREATE_THREAD(&threads2[i], compute_multi_scattering_thread,
                     (void *)&tdata2[i]);
     }
 
@@ -1362,7 +1364,7 @@ void get_sky_transmittance(DATARRAY *tau, double r, double mu, float *result) {
   free(trans);
 }
 
-void get_sky_radiance(DATARRAY *scat, DATARRAY *scat1m, double nu, double pt[4],
+void get_sky_radiance(DATARRAY *scat, DATARRAY *scat1m, const double nu, double pt[4],
                       float *result) {
   DATARRAY *scattering = datavector(scat, pt);
   DATARRAY *single_mie_scattering = datavector(scat1m, pt);
@@ -1374,4 +1376,77 @@ void get_sky_radiance(DATARRAY *scat, DATARRAY *scat1m, double nu, double pt[4],
   }
   free(single_mie_scattering);
   free(scattering);
+}
+
+void  get_sun_sky_irradiance(DATARRAY *tau, DATARRAY *irrad, const double radius, 
+                             const FVECT point, const FVECT normal, 
+                             const FVECT sundir, double *result) {
+  double mu_s = fdot(point, sundir) / radius;
+
+  double point_trans_sun[NSSAMP] = {0};
+  get_transmittance_to_sun(tau, radius, mu_s, point_trans_sun);
+
+  DATARRAY *indirect_irradiance = get_irradiance(irrad, radius, mu_s);
+  double sun_ct = fmax(fdot(normal, sundir), 0.0);
+
+  for (int i = 0; i < NSSAMP; ++i) {
+    result[i] = indirect_irradiance->arr.d[i] + point_trans_sun[i] * EXTSOL[i] * sun_ct;
+  }
+
+  free(indirect_irradiance);
+}
+
+
+void get_ground_radiance(DATARRAY *tau, DATARRAY *scat, DATARRAY *scat1m, DATARRAY *irrad, 
+                         const FVECT view_point, const FVECT view_direction, 
+                         const double radius, const double mu, const double sun_ct, 
+                         const double nu, const double grefl, const FVECT sundir, 
+                         float *ground_radiance) {
+
+  const int intersect = ray_intersects_ground(radius, mu);
+
+  if (intersect) {
+    FVECT point, normal;
+    const double distance = distance_to_nearst_atmosphere_boundary(radius, mu, intersect);
+
+    // direct + indirect irradiance
+    VSUM(point, view_point, view_direction, distance);
+    VCOPY(normal, point);
+    const double r2 = ER;
+    normalize(normal);
+    double irradiance[NSSAMP] = {0};
+    get_sun_sky_irradiance(tau, irrad, r2, point, normal, sundir, irradiance);
+
+    // transmittance between view point and ground point
+    double trans[NSSAMP] = {0};
+    get_transmittance(tau, radius, mu, distance, intersect, trans);
+
+    // inscattering
+    double u,v,w,z;
+    to_scattering_uvwz(radius, mu, sun_ct, nu, intersect, &u, &v, &w, &z);
+    double pt[4] = {z, w, v, u};
+    float inscatter[NSSAMP] = {0}; 
+    get_sky_radiance(scat, scat1m, nu, pt, inscatter);
+
+    printf("point %f %f %f, normal %f %f %f, nu: %f, distance: %f, inscatter: %f, irradiance: %f, trans: %f\n", point[0],point[1],point[2], normal[0],normal[1],normal[2], nu, distance, inscatter[0], irradiance[0], trans[0]);
+    for (int i = 0; i < NSSAMP; ++i) {
+      ground_radiance[i] = inscatter[i] + irradiance[i] * trans[i] * grefl / M_PI;
+      // ground_radiance[i] = inscatter[i];
+    }
+  }
+}
+
+void get_solar_radiance(DATARRAY *tau, DATARRAY *scat, DATARRAY *scat1m, const FVECT sundir, const double radius, const double sun_ct, double *sun_radiance) {
+  double trans_sun[NSSAMP] = {0};
+  float sky_radiance_sun[NSSAMP] = {0};
+  double u, v, w, z;
+  double nu = fdot(sundir, sundir);
+  int intersects_ground = 0;
+  to_scattering_uvwz(radius, sun_ct, sun_ct, nu, intersects_ground, &u, &v, &w, &z);
+  double pt[4] = { u, v, w, z};
+  get_transmittance_to_sun(tau, radius, sun_ct, trans_sun);
+  get_sky_radiance(scat, scat1m, nu, pt, sky_radiance_sun);
+  for (int i = 0; i < NSSAMP; ++i) {
+    sun_radiance[i] = sky_radiance_sun[i] + trans_sun[i] * EXTSOL[i] / SOLOMG;
+  }
 }

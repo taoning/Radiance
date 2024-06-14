@@ -78,6 +78,12 @@ extern void get_sky_transmittance(DATARRAY *tau, double r, double mu, float *res
 extern void get_sky_radiance(DATARRAY *scat, DATARRAY *scat1m, double nu,
                              double pt[4], float *result);
 
+extern void get_solar_radiance(DATARRAY *tau, DATARRAY *scat, DATARRAY *scat1m, const FVECT sundir, const double radius, const double sun_ct, double *sun_radiance); 
+
+extern void get_ground_radiance(DATARRAY *tau, DATARRAY *scat, DATARRAY *scat1m, DATARRAY *irrad, 
+                                const FVECT view_point, const FVECT view_direction, const double radius, const double mu, const double sun_ct, const double nu, 
+                                const double grefl, const FVECT sundir, float *result);
+
 extern void add_cloud_radiance(DATARRAY *scat, double nu, double pt[4],
                                float *result);
 
