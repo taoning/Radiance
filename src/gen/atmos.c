@@ -665,7 +665,7 @@ static void from_irradiance_uv(const double u, const double v, double *r,
   *mu_s = clamp_cosine(x_mu_s * 2.0 - 1.0);
 }
 
-DATARRAY *get_irradiance(DATARRAY *dp, const double r,
+DATARRAY *get_indirect_irradiance(DATARRAY *dp, const double r,
                                 const double mu_s) {
   double u, v;
   to_irradiance_uv(r, mu_s, &u, &v);
@@ -753,7 +753,7 @@ compute_scattering_density(const Atmosphere *atmos, DATARRAY *tau_dp,
           zenith_direction[2] * r + omega_i[2] * distance_to_ground};
       normalize(ground_normal);
       DATARRAY *ground_irradiance =
-          get_irradiance(irrad_dp, ER, fdot(ground_normal, omega_s));
+          get_indirect_irradiance(irrad_dp, ER, fdot(ground_normal, omega_s));
       for (int i = 0; i < NSSAMP; ++i) {
         assert(ground_irradiance->arr.d[i] >= 0.0);
         assert(transmittance_to_ground[i] >= 0.0 &&
@@ -1378,15 +1378,15 @@ void get_sky_radiance(DATARRAY *scat, DATARRAY *scat1m, const double nu, double 
   free(scattering);
 }
 
-void  get_sun_sky_irradiance(DATARRAY *tau, DATARRAY *irrad, const double radius, 
-                             const FVECT point, const FVECT normal, 
-                             const FVECT sundir, double *result) {
+void get_irradiance(DATARRAY *tau, DATARRAY *irrad, const double radius, 
+                    const FVECT point, const FVECT normal, 
+                    const FVECT sundir, double *result) {
   double mu_s = fdot(point, sundir) / radius;
 
   double point_trans_sun[NSSAMP] = {0};
   get_transmittance_to_sun(tau, radius, mu_s, point_trans_sun);
 
-  DATARRAY *indirect_irradiance = get_irradiance(irrad, radius, mu_s);
+  DATARRAY *indirect_irradiance = get_indirect_irradiance(irrad, radius, mu_s);
   double sun_ct = fmax(fdot(normal, sundir), 0.0);
 
   for (int i = 0; i < NSSAMP; ++i) {
@@ -1407,15 +1407,14 @@ void get_ground_radiance(DATARRAY *tau, DATARRAY *scat, DATARRAY *scat1m, DATARR
 
   if (intersect) {
     FVECT point, normal;
-    const double distance = distance_to_nearst_atmosphere_boundary(radius, mu, intersect);
+    const double distance = distance_to_earth(radius, mu);
 
     // direct + indirect irradiance
     VSUM(point, view_point, view_direction, distance);
     VCOPY(normal, point);
-    const double r2 = ER;
     normalize(normal);
     double irradiance[NSSAMP] = {0};
-    get_sun_sky_irradiance(tau, irrad, r2, point, normal, sundir, irradiance);
+    get_irradiance(tau, irrad, ER, point, normal, sundir, irradiance);
 
     // transmittance between view point and ground point
     double trans[NSSAMP] = {0};
@@ -1428,10 +1427,8 @@ void get_ground_radiance(DATARRAY *tau, DATARRAY *scat, DATARRAY *scat1m, DATARR
     float inscatter[NSSAMP] = {0}; 
     get_sky_radiance(scat, scat1m, nu, pt, inscatter);
 
-    printf("point %f %f %f, normal %f %f %f, nu: %f, distance: %f, inscatter: %f, irradiance: %f, trans: %f\n", point[0],point[1],point[2], normal[0],normal[1],normal[2], nu, distance, inscatter[0], irradiance[0], trans[0]);
     for (int i = 0; i < NSSAMP; ++i) {
       ground_radiance[i] = inscatter[i] + irradiance[i] * trans[i] * grefl / M_PI;
-      // ground_radiance[i] = inscatter[i];
     }
   }
 }

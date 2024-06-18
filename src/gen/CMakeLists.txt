@@ -12,7 +12,7 @@ target_link_libraries(genmarble ${LIB_M})
 add_executable(gensky gensky.c sun.c)
 target_link_libraries(gensky rtrad ${LIB_M})
 
-add_executable(genssky genssky.c sun.c)
+add_executable(genssky genssky.c sun.c atmos.c ../rt/data.c)
 target_link_libraries(genssky rtrad ${LIB_M})
 
 add_executable(gendaylit gendaylit.c sun.c)
@@ -66,6 +66,7 @@ install(TARGETS
   genprism
   genrev
   gensky
+  genssky
   gensurf
   genworm
   mkillum
@@ -85,6 +86,7 @@ file(COPY
   rev.cal
   skybright.cal
   surf.cal
+  mie_ca.dat
   DESTINATION "${CMAKE_BINARY_DIR}/lib"
 )
 

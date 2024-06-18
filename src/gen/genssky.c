@@ -53,13 +53,15 @@ static double get_overcast_brightness(const double dz, const double sundir[3]) {
 }
 
 static void write_rad_file(FILE *fp, const double *sun_radiance, const FVECT sundir, const char skyfile[PATH_MAX], const char grndfile[PATH_MAX]) {
-  fprintf(fp, "void spectrum sunrad\n0\n0\n22 380 780 ");
-  for (int i = 0; i < NSSAMP; ++i) {
-    fprintf(fp, "%.1f ", sun_radiance[i] * WVLSPAN);
+  if (sundir[2] > 0) {
+    fprintf(fp, "void spectrum sunrad\n0\n0\n22 380 780 ");
+    for (int i = 0; i < NSSAMP; ++i) {
+      fprintf(fp, "%.1f ", sun_radiance[i] * WVLSPAN);
+    }
+    fprintf(fp, "\n\nsunrad light solar\n0\n0\n3 1 1 1\n\n");
+    fprintf(fp, "solar source sun\n0\n0\n4 %f %f %f 0.533\n\n", sundir[0],
+            sundir[1], sundir[2]);
   }
-  fprintf(fp, "\n\nsunrad light solar\n0\n0\n3 1 1 1\n\n");
-  fprintf(fp, "solar source sun\n0\n0\n4 %f %f %f 0.533\n\n", sundir[0],
-          sundir[1], sundir[2]);
   fprintf(fp,
           "void specpict skyfunc\n8 noop %s fisheye.cal fish_u fish_v -rx 90 "
           "-mx\n0\n0\n\n",
@@ -69,7 +71,7 @@ static void write_rad_file(FILE *fp, const double *sun_radiance, const FVECT sun
 
   fprintf(fp,
           "void specpict grndmap\n8 noop %s fisheye.cal fish_u fish_v -rx -90 "
-          "-mx\n0\n0\n\n",
+          "-my\n0\n0\n\n",
           grndfile);
   fprintf(fp, "grndmap glow ground_glow\n0\n0\n4 1 1 1 0\n\n");
   fprintf(fp, "ground_glow source ground_source\n0\n0\n4 0 0 -1 180\n\n");
@@ -122,7 +124,7 @@ int gen_spect_sky(DATARRAY *tau_clear, DATARRAY *scat_clear,
 
   CNDX[3] = NSSAMP;
 
-  FVECT view_point = {0, 0, ER+100};
+  FVECT view_point = {0, 0, ER};
   double radius = VLEN(view_point);
   double sun_ct = fdot(view_point, sundir) / radius;
   for (unsigned int j = 0; j < res; ++j) {
