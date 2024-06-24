@@ -175,7 +175,7 @@ int main(int argc, char *argv[]) {
   /* initial allocation */
   mtx_data = resize_dmatrix(mtx_data, tstorage = 2, nskypatch);
   while (scanf("%d %d %lf %lf %lf\n", &mo, &da, &hr, &aod, &cc) == 5) {
-    double sundir[3];
+    FVECT sundir;
     compute_sundir(0, mo, da, hr, 0, sundir);
     if (sun_hours_only && sundir[2] <= 0.)
       continue; /* skipping nighttime points */

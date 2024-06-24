@@ -1,11 +1,8 @@
 #ifndef ATMOS_H
 #define ATMOS_H
 
-#include <assert.h> // to be removed
-#include <linux/limits.h>
 #include <math.h>
 #include <stdio.h>
-#include <time.h> // to be removed
 
 #include "color.h"
 #include "data.h"

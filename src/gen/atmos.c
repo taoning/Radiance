@@ -325,8 +325,6 @@ static void to_transmittance_uv(const double r, const double mu, double *u,
   double x_r = rho / H;
   *u = fmax(0.0, fmin(1.0, x_mu));
   *v = fmax(0.0, fmin(1.0, x_r));
-  // *u = 0.5 / 256 + x_mu * (1.0 - 1.0 / 256);
-  // *v = 0.5 / 64 + x_r * (1.0 - 1.0 / 64);
 }
 
 static void from_transmittance_uv(const double u, const double v, double *r,
@@ -1378,9 +1376,9 @@ void get_sky_radiance(DATARRAY *scat, DATARRAY *scat1m, const double nu, double 
   free(scattering);
 }
 
-void get_irradiance(DATARRAY *tau, DATARRAY *irrad, const double radius, 
-                    const FVECT point, const FVECT normal, 
-                    const FVECT sundir, double *result) {
+static void get_irradiance(DATARRAY *tau, DATARRAY *irrad, const double radius, 
+                             const FVECT point, const FVECT normal, 
+                             const FVECT sundir, double *result) {
   double mu_s = fdot(point, sundir) / radius;
 
   double point_trans_sun[NSSAMP] = {0};
