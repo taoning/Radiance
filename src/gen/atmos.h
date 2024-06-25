@@ -35,10 +35,10 @@ typedef struct {
 } Atmosphere;
 
 typedef struct {
-  char *tau;
-  char *scat;
-  char *scat1m;
-  char *irrad;
+  char tau[PATH_MAX];
+  char scat[PATH_MAX];
+  char scat1m[PATH_MAX];
+  char irrad[PATH_MAX];
 } DpPaths;
 
 extern const double ER;
@@ -59,9 +59,6 @@ extern const float BCLOUD;
 extern const double AOD0_CA;
 extern const double SOLOMG;
 
-extern void to_scattering_uvwz(double r, double mu, double mu_s, double nu,
-                               int ray_r_mu_intersects_ground, double *u,
-                               double *v, double *w, double *z);
 extern void get_rmumusnu(FVECT vpt, FVECT vdir, FVECT sundir, double *r,
                          double *mu, double *mu_s, double *nu);
 
@@ -70,8 +67,8 @@ extern void get_transmittance_to_sun(DATARRAY *tau_dp, const double r,
 
 extern void get_sky_transmittance(DATARRAY *tau, double r, double mu, float *result);
 
-extern void get_sky_radiance(DATARRAY *scat, DATARRAY *scat1m, double nu,
-                             double pt[4], float *result);
+extern void get_sky_radiance(DATARRAY *scat, DATARRAY *scat1m, const double radius, 
+                             const double mu, const double mu_s, const double nu, float *result);
 
 extern void get_solar_radiance(DATARRAY *tau, DATARRAY *scat, DATARRAY *scat1m, const FVECT sundir, const double radius, const double sun_ct, double *sun_radiance); 
 
@@ -86,7 +83,7 @@ extern int compute_sundir(const int year, const int month, const int day,
                           const double hour, const int tsolar,
                           double sundir[3]);
 
-extern int precompute(const int sorder, DpPaths *dppaths, const Atmosphere *atmos,
+extern int precompute(const int sorder, const DpPaths dppaths, const Atmosphere *atmos,
                       int num_threads);
 
 #endif // ATMOS_H

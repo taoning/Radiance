@@ -543,7 +543,7 @@ data_interp(const DATARRAY *dp, double *pt, double coef, DATATYPE *rvec)
 
 double
 datavalue(		/* interpolate data value at a point */
-	const DATARRAY  *dp,
+	DATARRAY  *dp,
 	double	*pt
 )
 {
@@ -553,7 +553,7 @@ datavalue(		/* interpolate data value at a point */
 
 /* Interpolate final vector corresponding to last dimension in data array */
 DATARRAY *
-datavector(const DATARRAY *dp, double *pt)
+datavector(DATARRAY *dp, double *pt)
 {
 	DATARRAY	*newdp;
 
