@@ -298,8 +298,8 @@ int main(int argc, char *argv[]) {
     return 0;
   }
   if (!strcmp(argv[1], "-ang")) {
-    float altitude = atof(argv[2]) * (M_PI / 180);
-    float azimuth = atof(argv[3]) * (M_PI / 180);
+    float altitude = atof(argv[2]) * (PI / 180);
+    float azimuth = atof(argv[3]) * (PI / 180);
     month = 0;
     sundir[0] = -sin(azimuth) * cos(altitude);
     sundir[1] = -cos(azimuth) * cos(altitude);
