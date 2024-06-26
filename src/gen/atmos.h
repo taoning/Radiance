@@ -1,9 +1,6 @@
 #ifndef ATMOS_H
 #define ATMOS_H
 
-#include <math.h>
-#include <stdio.h>
-
 #include "color.h"
 #include "data.h"
 #include "fvect.h"
@@ -32,6 +29,7 @@ typedef struct {
   const float *beta_r0;
   float beta_scale;
   DATARRAY *beta_m;
+  const double grefl;
 } Atmosphere;
 
 typedef struct {

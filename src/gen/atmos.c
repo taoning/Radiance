@@ -1,8 +1,5 @@
-#include "copyright.h"
 #include "atmos.h"
 #include "data.h"
-#include <linux/limits.h>
-#include <math.h>
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <windows.h>
@@ -13,7 +10,7 @@
 #if defined(_WIN32) || defined(_WIN64)
 #define THREAD HANDLE
 #define CREATE_THREAD(thread, func, context)                                   \
-  ((*(thread) = CreateThread(NULL, 0, (LPTHREAD_STRAT_ROUTINE)(func),          \
+  ((*(thread) = CreateThread(NULL, 0, (func),          \
                              (context), 0, NULL)) != NULL)
 #define THREAD_RETURN DWORD WINAPI
 #define THREAD_JOIN(thread) WaitForSingleObject(thread, INFINITE)
@@ -66,13 +63,8 @@ const float START_WVL = 390.0;
 const float END_WVL = 770.0;
 const double SUNRAD = 0.004625;
 
-// The cosine of the maximum Sun zenith angle for which atmospheric scattering
-// must be precomputed (for maximum precision, use the smallest Sun zenith
-// angle yielding negligible sky light radiance values. For instance, for the
-// Earth case, 102 degrees is a good choice - yielding mu_s_min = -0.2).
+// The cosine of the maximum Sun zenith angle
 const double MU_S_MIN = -0.2;
-
-const double GROUND_ALBEDO = 0.2;
 
 // Scale heights (m)
 // Rayleigh scattering
@@ -632,7 +624,7 @@ compute_scattering_density(const Atmosphere *atmos, DATARRAY *tau_dp,
       // assert(distance_to_ground >= 0.0 && distance_to_ground <= HMAX);
       get_transmittance(tau_dp, radius, cos_theta, distance_to_ground, r_theta_hits_ground,
                         transmittance_to_ground);
-      ground_albedo = GROUND_ALBEDO;
+      ground_albedo = atmos->grefl;
     }
 
     for (int m = 0; m < 2 * SAMPLE_COUNT; ++m) {
@@ -1027,7 +1019,7 @@ int precompute(const int sorder, const DpPaths dppaths, const Atmosphere *atmos,
   const int tremainder = SCATTERING_TEXTURE_R_SIZE % num_threads;
 
   if (sorder < 2) {
-    printf("scattering order must be at least 2\n");
+    fprintf(stderr, "scattering order must be at least 2\n");
     return 0;
   }
 
@@ -1061,7 +1053,7 @@ int precompute(const int sorder, const DpPaths dppaths, const Atmosphere *atmos,
       SCATTERING_TEXTURE_NU_SIZE, NSSAMP);
 
   int idx = 0;
-  printf("# Computing transmittance...\n");
+  // Computing transmittance...
   for (int j = 0; j < TRANSMITTANCE_TEXTURE_HEIGHT; ++j) {
     for (int i = 0; i < TRANSMITTANCE_TEXTURE_WIDTH; ++i) {
       double r, mu;
@@ -1078,7 +1070,7 @@ int precompute(const int sorder, const DpPaths dppaths, const Atmosphere *atmos,
   }
   savedata(tau_dp);
 
-  printf("# Computing direct irradiance...\n");
+  // Computing direct irradiance...
   idx = 0;
   for (int j = 0; j < IRRADIANCE_TEXTURE_HEIGHT; ++j) {
     for (int i = 0; i < IRRADIANCE_TEXTURE_WIDTH; ++i) {
@@ -1096,9 +1088,9 @@ int precompute(const int sorder, const DpPaths dppaths, const Atmosphere *atmos,
     }
   }
 
-  printf("# Computing single scattering...\n");
-  THREAD threads[num_threads];
-  Scat1Tdat tdata[num_threads];
+  // Computing single scattering...
+  THREAD *threads = (THREAD *)malloc(num_threads * sizeof(THREAD));
+  Scat1Tdat *tdata = (Scat1Tdat *)malloc(num_threads * sizeof(Scat1Tdat));
   for (int i = 0; i < num_threads; i++) {
     tdata[i].atmos = atmos;
     tdata[i].tau_dp = tau_dp;
@@ -1119,6 +1111,8 @@ int precompute(const int sorder, const DpPaths dppaths, const Atmosphere *atmos,
     THREAD_CLOSE(threads[i]);
 #endif
   }
+  free(tdata);
+  free(threads);
   savedata(delta_mie_scattering_dp);
 
 
@@ -1126,9 +1120,8 @@ int precompute(const int sorder, const DpPaths dppaths, const Atmosphere *atmos,
   for (int scattering_order = 2; scattering_order <= sorder; ++scattering_order) {
     // Compute the scattering density, and store it in
     // delta_scattering_density_texture.
-    printf("# computing scattering density...\n");
-    THREAD threads[num_threads];
-    ScatDenseTdat tdata[num_threads];
+    THREAD *threads = (THREAD *)malloc(num_threads * sizeof(THREAD));
+    ScatDenseTdat *tdata = (ScatDenseTdat *)malloc(num_threads * sizeof(ScatDenseTdat));
     for (int i = 0; i < num_threads; i++) {
       tdata[i].atmos = atmos;
       tdata[i].tau_dp = tau_dp;
@@ -1152,10 +1145,11 @@ int precompute(const int sorder, const DpPaths dppaths, const Atmosphere *atmos,
       THREAD_CLOSE(threads[i]);
 #endif
     }
+    free(tdata);
+    free(threads);
 
     // Compute the indirect irradiance, store it in delta_irradiance_texture
     // and accumulate it in irradiance_texture_.
-    printf("# Computing indirect irradiance...\n");
     idx = 0;
     for (unsigned int j = 0; j < IRRADIANCE_TEXTURE_HEIGHT; ++j) {
       for (unsigned int i = 0; i < IRRADIANCE_TEXTURE_WIDTH; ++i) {
@@ -1177,9 +1171,9 @@ int precompute(const int sorder, const DpPaths dppaths, const Atmosphere *atmos,
 
     increment_dp(irradiance_dp, delta_irradiance_dp);
 
-    printf("# Computing multiple scattering...\n");
-    THREAD threads2[num_threads];
-    ScatNTdat tdata2[num_threads];
+    // Computing multiple scattering...
+    THREAD *threads2 = (THREAD *)malloc(num_threads * sizeof(THREAD));
+    ScatNTdat *tdata2 = (ScatNTdat *)malloc(num_threads * sizeof(ScatNTdat));
     for (int i = 0; i < num_threads; i++) {
       tdata2[i].tau_dp = tau_dp;
       tdata2[i].delta_multiple_scattering_dp = delta_multiple_scattering_dp;
@@ -1199,6 +1193,8 @@ int precompute(const int sorder, const DpPaths dppaths, const Atmosphere *atmos,
       THREAD_CLOSE(threads2[i]);
 #endif
     }
+    free(tdata2);
+    free(threads2);
   }
   savedata(scattering_dp);
   savedata(irradiance_dp);
@@ -1315,7 +1311,7 @@ void get_ground_radiance(DATARRAY *tau, DATARRAY *scat, DATARRAY *scat1m, DATARR
     get_sky_radiance(scat, scat1m, radius, mu, sun_ct, nu, inscatter);
 
     for (int i = 0; i < NSSAMP; ++i) {
-      ground_radiance[i] = inscatter[i] + irradiance[i] * trans[i] * grefl / M_PI;
+      ground_radiance[i] = inscatter[i] + irradiance[i] * trans[i] * grefl / PI;
     }
   }
 }

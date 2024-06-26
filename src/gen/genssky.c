@@ -2,19 +2,10 @@
 // Cloudy sky computed as weight average of clear and cie overcast sky
 
 #include "copyright.h"
-#include <math.h>
-#include <stdio.h>
-
 #include "atmos.h"
-#include "color.h"
-#include "data.h"
-#include "fvect.h"
-#include "paths.h"
 #include "resolu.h"
-#include "rtio.h"
-#include "rtmath.h"
-#include "sun.h"
 #include "view.h"
+
 
 char *progname;
 
@@ -222,7 +213,7 @@ static DpPaths get_dppaths(const double aod, const char *tag) {
 static void set_rayleigh_density_profile(Atmosphere *atmos, char *tag, const int is_summer,
                                          const double s_latitude) {
   // Set rayleigh density profile
-  if (fabs(s_latitude*180.0/M_PI) > ARCTIC_LAT) {
+  if (fabs(s_latitude*180.0 / PI) > ARCTIC_LAT) {
     tag[0] = 's';
     if (is_summer) {
       tag[1] = 's';
@@ -233,7 +224,7 @@ static void set_rayleigh_density_profile(Atmosphere *atmos, char *tag, const int
       atmos->rayleigh_density.layers[0].exp_scale = -1.0 / HR_SW;
       atmos->beta_r0 = BR0_SW;
     }
-  } else if (fabs(s_latitude*180.0/M_PI) > TROPIC_LAT) {
+  } else if (fabs(s_latitude*180.0/PI) > TROPIC_LAT) {
     tag[0] = 'm';
     if (is_summer) {
       tag[1] = 's';
@@ -253,7 +244,7 @@ static void set_rayleigh_density_profile(Atmosphere *atmos, char *tag, const int
   tag[2] = '\0';
 }
 
-static Atmosphere init_atmos(const double aod) {
+static Atmosphere init_atmos(const double aod, const double grefl) {
   Atmosphere atmos = {
       .ozone_density = {.layers =
                             {
@@ -279,6 +270,7 @@ static Atmosphere init_atmos(const double aod) {
       .beta_r0 = BR0_MS,
       .beta_scale = aod / AOD0_CA,
       .beta_m = NULL,
+      .grefl = grefl
   };
   return atmos;
 }
@@ -367,14 +359,13 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  Atmosphere clear_atmos = init_atmos(aod);
+  Atmosphere clear_atmos = init_atmos(aod, grefl);
 
   int is_summer = (month >= SUMMER_START && month <= SUMMER_END);
   if (s_latitude < 0) {
     is_summer = !is_summer;
   }
   set_rayleigh_density_profile(&clear_atmos, lstag, is_summer, s_latitude);
-  printf("%s\n", lstag);
 
   // Load mie density data
   DATARRAY *mie_dp = getdata(mie_path);
