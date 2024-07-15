@@ -1,11 +1,10 @@
 // Main function for generating spectral sky
 // Cloudy sky computed as weight average of clear and cie overcast sky
 
-#include "copyright.h"
 #include "atmos.h"
+#include "copyright.h"
 #include "resolu.h"
 #include "view.h"
-
 
 char *progname;
 
@@ -22,6 +21,30 @@ const double D6415[NSSAMP] = {0.63231, 1.06171, 1.00779, 1.36423, 1.34133,
                               1.27258, 1.26276, 1.26352, 1.22201, 1.13246,
                               1.0434,  1.05547, 0.98212, 0.94445, 0.9722,
                               0.82387, 0.87853, 0.82559, 0.75111, 0.78925};
+
+static void basename(const char *path, char *output) {
+  char *last_slash = strrchr(path, '/');
+  char *last_backslash = strrchr(path, '\\');
+  char *filename = (char *)path;
+  char *last_dot;
+
+  if (last_slash && last_backslash) {
+    filename =
+        (last_slash > last_backslash) ? last_slash + 1 : last_backslash + 1;
+  } else if (last_slash) {
+    filename = last_slash + 1;
+  } else if (last_backslash) {
+    filename = last_backslash + 1;
+  }
+
+  last_dot = strrchr(filename, '.');
+  if (last_dot) {
+    strncpy(output, filename, last_dot - filename);
+    output[last_dot - filename] = '\0';
+  } else {
+    strcpy(output, filename);
+  }
+}
 
 static inline double wmean2(const double a, const double b, const double x) {
   return a * (1 - x) + b * x;
@@ -49,31 +72,34 @@ static double get_overcast_brightness(const double dz, const double zenithbr) {
                pow(dz + 1.01, -10), groundbr);
 }
 
-static void write_rad_file(FILE *fp, const double *sun_radiance,
-                           const FVECT sundir, const char skyfile[PATH_MAX],
-                           const char grndfile[PATH_MAX]) {
+static void write_rad(const double *sun_radiance, const FVECT sundir,
+                      const char skyfile[PATH_MAX],
+                      const char grndfile[PATH_MAX]) {
   if (sundir[2] > 0) {
-    fprintf(fp, "void spectrum sunrad\n0\n0\n22 380 780 ");
+    printf("void spectrum sunrad\n0\n0\n22 380 780 ");
+    // Normalize to one
+    double sum = 0.0;
     for (int i = 0; i < NSSAMP; ++i) {
-      fprintf(fp, "%.1f ", sun_radiance[i] * WVLSPAN);
+      sum += sun_radiance[i];
     }
-    fprintf(fp, "\n\nsunrad light solar\n0\n0\n3 1 1 1\n\n");
-    fprintf(fp, "solar source sun\n0\n0\n4 %f %f %f 0.533\n\n", sundir[0],
-            sundir[1], sundir[2]);
+    double mean = sum / NSSAMP;
+    for (int i = 0; i < NSSAMP; ++i) {
+      printf("%.3f ", sun_radiance[i] / mean);
+    }
+    double intensity = mean * WVLSPAN;
+    printf("\n\nsunrad light solar\n0\n0\n3 %.1f %.1f %.1f\n\n", intensity,
+           intensity, intensity);
+    printf("solar source sun\n0\n0\n4 %f %f %f 0.533\n\n", sundir[0], sundir[1],
+           sundir[2]);
   }
-  fprintf(fp,
-          "void specpict skyfunc\n8 noop %s fisheye.cal fish_u fish_v -rx 90 "
-          "-mx\n0\n0\n\n",
-          skyfile);
-  fprintf(fp, "skyfunc glow sky_glow\n0\n0\n4 1 1 1 0\n\n");
-  fprintf(fp, "sky_glow source sky\n0\n0\n4 0 0 1 180\n\n");
+  printf("void specpict skymap\n8 noop %s fisheye.cal fish_u fish_v -rx 90 "
+         "-mx\n0\n0\n\n",
+         skyfile);
 
-  fprintf(fp,
-          "void specpict grndmap\n8 noop %s fisheye.cal fish_u fish_v -rx -90 "
-          "-my\n0\n0\n\n",
-          grndfile);
-  fprintf(fp, "grndmap glow ground_glow\n0\n0\n4 1 1 1 0\n\n");
-  fprintf(fp, "ground_glow source ground_source\n0\n0\n4 0 0 -1 180\n\n");
+  printf("void specpict grndmap\n8 noop %s fisheye.cal fish_u fish_v -rx -90 "
+         "-my\n0\n0\n\n",
+         grndfile);
+  printf("void mixfunc skyfunc\n4 skymap grndmap if(Dz,1,0) .\n0\n0\n");
 }
 
 static void write_hsr_header(FILE *fp, RESOLU *res) {
@@ -91,14 +117,8 @@ int gen_spect_sky(DATARRAY *tau_clear, DATARRAY *scat_clear,
                   DATARRAY *scat1m_clear, DATARRAY *irrad_clear,
                   const double cloud_cover, const FVECT sundir,
                   const double grefl, const int res, const char *outname) {
-
-  char radfile[PATH_MAX];
   char skyfile[PATH_MAX];
   char grndfile[PATH_MAX];
-  if (!snprintf(radfile, sizeof(radfile), "%s.rad", outname)) {
-    fprintf(stderr, "Error setting rad file name\n");
-    return 0;
-  };
   if (!snprintf(skyfile, sizeof(skyfile), "%s_sky.hsr", outname)) {
     fprintf(stderr, "Error setting sky file name\n");
     return 0;
@@ -193,9 +213,7 @@ int gen_spect_sky(DATARRAY *tau_clear, DATARRAY *scat_clear,
     }
   }
 
-  FILE *rfp = fopen(radfile, "w");
-  write_rad_file(rfp, sun_radiance, sundir, skyfile, grndfile);
-  fclose(rfp);
+  write_rad(sun_radiance, sundir, skyfile, grndfile);
   return 1;
 }
 
@@ -210,10 +228,11 @@ static DpPaths get_dppaths(const double aod, const char *tag) {
   return paths;
 }
 
-static void set_rayleigh_density_profile(Atmosphere *atmos, char *tag, const int is_summer,
+static void set_rayleigh_density_profile(Atmosphere *atmos, char *tag,
+                                         const int is_summer,
                                          const double s_latitude) {
   // Set rayleigh density profile
-  if (fabs(s_latitude*180.0 / PI) > ARCTIC_LAT) {
+  if (fabs(s_latitude * 180.0 / PI) > ARCTIC_LAT) {
     tag[0] = 's';
     if (is_summer) {
       tag[1] = 's';
@@ -224,7 +243,7 @@ static void set_rayleigh_density_profile(Atmosphere *atmos, char *tag, const int
       atmos->rayleigh_density.layers[0].exp_scale = -1.0 / HR_SW;
       atmos->beta_r0 = BR0_SW;
     }
-  } else if (fabs(s_latitude*180.0/PI) > TROPIC_LAT) {
+  } else if (fabs(s_latitude * 180.0 / PI) > TROPIC_LAT) {
     tag[0] = 'm';
     if (is_summer) {
       tag[1] = 's';
@@ -245,33 +264,31 @@ static void set_rayleigh_density_profile(Atmosphere *atmos, char *tag, const int
 }
 
 static Atmosphere init_atmos(const double aod, const double grefl) {
-  Atmosphere atmos = {
-      .ozone_density = {.layers =
-                            {
-                                {.width = 25000.0,
-                                 .exp_term = 0.0,
-                                 .exp_scale = 0.0,
-                                 .linear_term = 1.0 / 15000.0,
-                                 .constant_term = -2.0 / 3.0},
-                                {.width = AH,
-                                 .exp_term = 0.0,
-                                 .exp_scale = 0.0,
-                                 .linear_term = -1.0 / 15000.0,
-                                 .constant_term = 8.0 / 3.0},
-                            }},
-      .rayleigh_density = {.layers =
-                               {
-                                   {.width = AH,
-                                    .exp_term = 1.0,
-                                    .exp_scale = -1.0 / HR_MS,
-                                    .linear_term = 0.0,
-                                    .constant_term = 0.0},
-                               }},
-      .beta_r0 = BR0_MS,
-      .beta_scale = aod / AOD0_CA,
-      .beta_m = NULL,
-      .grefl = grefl
-  };
+  Atmosphere atmos = {.ozone_density = {.layers =
+                                            {
+                                                {.width = 25000.0,
+                                                 .exp_term = 0.0,
+                                                 .exp_scale = 0.0,
+                                                 .linear_term = 1.0 / 15000.0,
+                                                 .constant_term = -2.0 / 3.0},
+                                                {.width = AH,
+                                                 .exp_term = 0.0,
+                                                 .exp_scale = 0.0,
+                                                 .linear_term = -1.0 / 15000.0,
+                                                 .constant_term = 8.0 / 3.0},
+                                            }},
+                      .rayleigh_density = {.layers =
+                                               {
+                                                   {.width = AH,
+                                                    .exp_term = 1.0,
+                                                    .exp_scale = -1.0 / HR_MS,
+                                                    .linear_term = 0.0,
+                                                    .constant_term = 0.0},
+                                               }},
+                      .beta_r0 = BR0_MS,
+                      .beta_scale = aod / AOD0_CA,
+                      .beta_m = NULL,
+                      .grefl = grefl};
   return atmos;
 }
 
@@ -290,29 +307,37 @@ int main(int argc, char *argv[]) {
   double aod = AOD0_CA;
   char *outname = "out";
   char *mie_path = getpath("mie_ca.dat", getrlibpath(), R_OK);
+  char *mie_name = "mie_ca";
   char lstag[3];
 
-  if (argc < 5) {
-    fprintf(stderr, "Usage: %s month day hour -y year -a lat -o lon -m tz -d aod -r res -n nproc -c ccover -l mie -g grefl -f outpath\n",
+  
+  if (!strcmp(argv[1], "-defaults")) {
+    printf("scattering order: %d\n", sorder);
+    printf("ground reflectance: %f\n", grefl);
+    printf("cloud cover: %f\n", ccover);
+    printf("image resolution: %d\n", res);
+    printf("broadband aerosol optical depth: %f\n", AOD0_CA);
+    printf("out name: %s\n", outname);
+    exit(1);
+  }
+
+  if (argc < 4) {
+    fprintf(stderr,
+            "Usage: %s month day hour -y year -a lat -o lon -m tz -d aod -r "
+            "res -n nproc -c ccover -l mie -g grefl -f outpath\n",
             argv[0]);
     return 0;
   }
-  if (!strcmp(argv[1], "-ang")) {
-    float altitude = atof(argv[2]) * (PI / 180);
-    float azimuth = atof(argv[3]) * (PI / 180);
-    month = 0;
-    sundir[0] = -sin(azimuth) * cos(altitude);
-    sundir[1] = -cos(azimuth) * cos(altitude);
-    sundir[2] = sin(altitude);
-  } else {
-    month = atoi(argv[1]);
-    day = atoi(argv[2]);
-    hour = atof(argv[3]);
-    if (!compute_sundir(year, month, day, hour, tsolar, sundir)) {
-      fprintf(stderr, "Cannot compute solar angle\n");
-      exit(1);
-    }
+
+  month = atoi(argv[1]);
+  day = atoi(argv[2]);
+  hour = atof(argv[3]);
+
+  if (!compute_sundir(year, month, day, hour, tsolar, sundir)) {
+    fprintf(stderr, "Cannot compute solar angle\n");
+    exit(1);
   }
+
   for (int i = 4; i < argc; i++) {
     if (argv[i][0] == '-') {
       switch (argv[i][1]) {
@@ -333,6 +358,7 @@ int main(int argc, char *argv[]) {
         break;
       case 'l':
         mie_path = argv[++i];
+        basename(mie_path, mie_name);
         break;
       case 'm':
         s_meridian = atof(argv[++i]) * (PI / 180.0);
