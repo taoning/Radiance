@@ -5,6 +5,7 @@
 #include "copyright.h"
 #include "resolu.h"
 #include "view.h"
+#include <ctype.h>
 
 char *progname;
 
@@ -21,6 +22,61 @@ const double D6415[NSSAMP] = {0.63231, 1.06171, 1.00779, 1.36423, 1.34133,
                               1.27258, 1.26276, 1.26352, 1.22201, 1.13246,
                               1.0434,  1.05547, 0.98212, 0.94445, 0.9722,
                               0.82387, 0.87853, 0.82559, 0.75111, 0.78925};
+
+/* European and North American zones */
+struct {
+  char zname[8]; /* time zone name (all caps) */
+  float zmer;    /* standard meridian */
+} tzone[] = {{"YST", 135},   {"YDT", 120},   {"PST", 120},  {"PDT", 105},
+             {"MST", 105},   {"MDT", 90},    {"CST", 90},   {"CDT", 75},
+             {"EST", 75},    {"EDT", 60},    {"AST", 60},   {"ADT", 45},
+             {"NST", 52.5},  {"NDT", 37.5},  {"GMT", 0},    {"BST", -15},
+             {"CET", -15},   {"CEST", -30},  {"EET", -30},  {"EEST", -45},
+             {"AST", -45},   {"ADT", -60},   {"GST", -60},  {"GDT", -75},
+             {"IST", -82.5}, {"IDT", -97.5}, {"JST", -135}, {"NDT", -150},
+             {"NZST", -180}, {"NZDT", -195}, {"", 0}};
+
+static int cvthour(char *hs, int *tsolar, double *hour) {
+  char *cp = hs;
+  int i, j;
+
+  if ((*tsolar = *cp == '+'))
+    cp++; /* solar time? */
+  while (isdigit(*cp))
+    cp++;
+  if (*cp == ':')
+    *hour = atoi(hs) + atoi(++cp) / 60.0;
+  else {
+    *hour = atof(hs);
+    if (*cp == '.')
+      cp++;
+  }
+  while (isdigit(*cp))
+    cp++;
+  if (!*cp)
+    return (0);
+  if (tsolar || !isalpha(*cp)) {
+    fprintf(stderr, "%s: bad time format: %s\n", progname, hs);
+    exit(1);
+  }
+  i = 0;
+  do {
+    for (j = 0; cp[j]; j++)
+      if (toupper(cp[j]) != tzone[i].zname[j])
+        break;
+    if (!cp[j] && !tzone[i].zname[j]) {
+      s_meridian = tzone[i].zmer * (PI / 180);
+      return (1);
+    }
+  } while (tzone[i++].zname[0]);
+
+  fprintf(stderr, "%s: unknown time zone: %s\n", progname, cp);
+  fprintf(stderr, "Known time zones:\n\t%s", tzone[0].zname);
+  for (i = 1; tzone[i].zname[0]; i++)
+    fprintf(stderr, " %s", tzone[i].zname);
+  putc('\n', stderr);
+  exit(1);
+}
 
 static void basename(const char *path, char *output) {
   char *last_slash = strrchr(path, '/');
@@ -70,6 +126,12 @@ static double get_overcast_brightness(const double dz, const double zenithbr) {
   double groundbr = zenithbr * GNORM;
   return wmean(pow(dz + 1.01, 10), zenithbr * (1 + 2 * dz) / 3,
                pow(dz + 1.01, -10), groundbr);
+}
+
+static void write_rad_header(const double cloud_cover, const double grefl,
+                             const int res) {
+  printf("#Cloud cover: %g\n#Ground reflectance: %g\n#Image resolution: %d\n",
+         cloud_cover, grefl, res);
 }
 
 static void write_rad(const double *sun_radiance, const FVECT sundir,
@@ -213,6 +275,7 @@ int gen_spect_sky(DATARRAY *tau_clear, DATARRAY *scat_clear,
     }
   }
 
+  write_rad_header(cloud_cover, grefl, res);
   write_rad(sun_radiance, sundir, skyfile, grndfile);
   return 1;
 }
@@ -301,6 +364,7 @@ int main(int argc, char *argv[]) {
   int sorder = 4;
   int year = 0;
   int tsolar = 0;
+  int got_meridian = 0;
   double grefl = 0.2;
   double ccover = 0.0;
   int res = 128;
@@ -310,14 +374,13 @@ int main(int argc, char *argv[]) {
   char *mie_name = "mie_ca";
   char lstag[3];
 
-  
   if (!strcmp(argv[1], "-defaults")) {
-    printf("scattering order: %d\n", sorder);
-    printf("ground reflectance: %f\n", grefl);
-    printf("cloud cover: %f\n", ccover);
-    printf("image resolution: %d\n", res);
-    printf("broadband aerosol optical depth: %f\n", AOD0_CA);
-    printf("out name: %s\n", outname);
+    printf("scattering order (-i): %d\n", sorder);
+    printf("ground reflectance (-g): %f\n", grefl);
+    printf("cloud cover (-c): %f\n", ccover);
+    printf("image resolution (-r): %d\n", res);
+    printf("broadband aerosol optical depth (-d): %f\n", AOD0_CA);
+    printf("out name (-f): %s\n", outname);
     exit(1);
   }
 
@@ -330,8 +393,16 @@ int main(int argc, char *argv[]) {
   }
 
   month = atoi(argv[1]);
+  if (month < 1 || month > 12) {
+    fprintf(stderr, "bad month");
+    exit(1);
+  }
   day = atoi(argv[2]);
-  hour = atof(argv[3]);
+  if (day < 1 || day > 31) {
+    fprintf(stderr, "bad month");
+    exit(1);
+  }
+  got_meridian = cvthour(argv[3], &tsolar, &hour);
 
   if (!compute_sundir(year, month, day, hour, tsolar, sundir)) {
     fprintf(stderr, "Cannot compute solar angle\n");
@@ -361,6 +432,10 @@ int main(int argc, char *argv[]) {
         basename(mie_path, mie_name);
         break;
       case 'm':
+        if (got_meridian) {
+          ++i;
+          break;
+        }
         s_meridian = atof(argv[++i]) * (PI / 180.0);
         break;
       case 'o':
@@ -384,6 +459,13 @@ int main(int argc, char *argv[]) {
       }
     }
   }
+  if (year && (year < 1950) | (year > 2050))
+    fprintf(stderr, "%s: warning - year should be in range 1950-2050\n",
+            progname);
+  if (month && !tsolar && fabs(s_meridian - s_longitude) > 45 * PI / 180)
+    fprintf(stderr,
+            "%s: warning - %.1f hours btwn. standard meridian and longitude\n",
+            progname, (s_longitude - s_meridian) * 12 / PI);
 
   Atmosphere clear_atmos = init_atmos(aod, grefl);
 
@@ -407,9 +489,9 @@ int main(int argc, char *argv[]) {
       getpath(clear_paths.scat, ".", R_OK) == NULL ||
       getpath(clear_paths.scat1m, ".", R_OK) == NULL ||
       getpath(clear_paths.irrad, ".", R_OK) == NULL) {
-    printf("# Precomputing...\n");
+    printf("# Pre-computing...\n");
     if (!precompute(sorder, clear_paths, &clear_atmos, num_threads)) {
-      fprintf(stderr, "Precompute failed\n");
+      fprintf(stderr, "Pre-compute failed\n");
       return 0;
     }
   }
