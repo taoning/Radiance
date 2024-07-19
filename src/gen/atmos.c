@@ -74,11 +74,9 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 Additional modifications by T. Wang
-- N dimensional data storage and lookup using Radiance data structure
+- N-dimensional data storage and lookup using Radiance data structure
 - Mie scattering coefficients precomputed using libRadTrans and interpolated at runtime
 - Translation to C from C++ with multi-threading
-
-
 */
 
 #include "atmos.h"
@@ -1199,10 +1197,7 @@ int precompute(const int sorder, const DpPaths dppaths, const Atmosphere *atmos,
   savedata(delta_mie_scattering_dp);
 
 
-  // Compute the 2nd, 3rd and 4th order of scattering, in sequence.
   for (int scattering_order = 2; scattering_order <= sorder; ++scattering_order) {
-    // Compute the scattering density, and store it in
-    // delta_scattering_density_texture.
     THREAD *threads = (THREAD *)malloc(num_threads * sizeof(THREAD));
     ScatDenseTdat *tdata = (ScatDenseTdat *)malloc(num_threads * sizeof(ScatDenseTdat));
     for (int i = 0; i < num_threads; i++) {
@@ -1231,8 +1226,6 @@ int precompute(const int sorder, const DpPaths dppaths, const Atmosphere *atmos,
     free(tdata);
     free(threads);
 
-    // Compute the indirect irradiance, store it in delta_irradiance_texture
-    // and accumulate it in irradiance_texture_.
     idx = 0;
     for (unsigned int j = 0; j < IRRADIANCE_TEXTURE_HEIGHT; ++j) {
       for (unsigned int i = 0; i < IRRADIANCE_TEXTURE_WIDTH; ++i) {
@@ -1254,7 +1247,6 @@ int precompute(const int sorder, const DpPaths dppaths, const Atmosphere *atmos,
 
     increment_dp(irradiance_dp, delta_irradiance_dp);
 
-    // Computing multiple scattering...
     THREAD *threads2 = (THREAD *)malloc(num_threads * sizeof(THREAD));
     ScatNTdat *tdata2 = (ScatNTdat *)malloc(num_threads * sizeof(ScatNTdat));
     for (int i = 0; i < num_threads; i++) {

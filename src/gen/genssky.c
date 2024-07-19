@@ -4,8 +4,16 @@
 #include "atmos.h"
 #include "copyright.h"
 #include "resolu.h"
+#include "rtio.h"
 #include "view.h"
 #include <ctype.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <errno.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#endif
 
 char *progname;
 
@@ -36,6 +44,20 @@ struct {
              {"IST", -82.5}, {"IDT", -97.5}, {"JST", -135}, {"NDT", -150},
              {"NZST", -180}, {"NZDT", -195}, {"", 0}};
 
+static int make_directory(const char *path) {
+#ifdef _WIN32
+  if (CreateDirectory(path, NULL) || GetLastError() == ERROR_ALREADY_EXISTS) {
+    return 1;
+  }
+  return 0;
+#else
+  if (mkdir(path, 0777) == 0 || errno == EEXIST) {
+    return 1;
+  }
+  return 0;
+#endif
+}
+
 static int cvthour(char *hs, int *tsolar, double *hour) {
   char *cp = hs;
   int i, j;
@@ -55,7 +77,7 @@ static int cvthour(char *hs, int *tsolar, double *hour) {
     cp++;
   if (!*cp)
     return (0);
-  if (tsolar || !isalpha(*cp)) {
+  if (*tsolar || !isalpha(*cp)) {
     fprintf(stderr, "%s: bad time format: %s\n", progname, hs);
     exit(1);
   }
@@ -78,11 +100,11 @@ static int cvthour(char *hs, int *tsolar, double *hour) {
   exit(1);
 }
 
-static void basename(const char *path, char *output) {
-  char *last_slash = strrchr(path, '/');
-  char *last_backslash = strrchr(path, '\\');
-  char *filename = (char *)path;
-  char *last_dot;
+static void basename(const char *path, char *output, size_t outsize) {
+  const char *last_slash = strrchr(path, '/');
+  const char *last_backslash = strrchr(path, '\\');
+  const char *filename = path;
+  const char *last_dot;
 
   if (last_slash && last_backslash) {
     filename =
@@ -95,11 +117,34 @@ static void basename(const char *path, char *output) {
 
   last_dot = strrchr(filename, '.');
   if (last_dot) {
-    strncpy(output, filename, last_dot - filename);
-    output[last_dot - filename] = '\0';
-  } else {
-    strcpy(output, filename);
+    size_t length = last_dot - filename;
+    if (length < outsize) {
+      strncpy(output, filename, length);
+      output[length] = '\0';
+    } else {
+      strncpy(output, filename, outsize - 1);
+      output[outsize - 1] = '\0';
+    }
   }
+}
+
+char *join_paths(const char *path1, const char *path2) {
+  size_t len1 = strlen(path1);
+  size_t len2 = strlen(path2);
+  int need_separator = (path1[len1 - 1] != DIRSEP);
+
+  char *result = malloc(len1 + len2 + (need_separator ? 2 : 1));
+  if (!result)
+    return NULL;
+
+  strcpy(result, path1);
+  if (need_separator) {
+    result[len1] = DIRSEP;
+    len1++;
+  }
+  strcpy(result + len1, path2);
+
+  return result;
 }
 
 static inline double wmean2(const double a, const double b, const double x) {
@@ -128,9 +173,14 @@ static double get_overcast_brightness(const double dz, const double zenithbr) {
                pow(dz + 1.01, -10), groundbr);
 }
 
-static void write_rad_header(const double cloud_cover, const double grefl,
-                             const int res) {
-  printf("#Cloud cover: %g\n#Ground reflectance: %g\n#Image resolution: %d\n",
+static void write_header(const int argc, char **argv, const double cloud_cover,
+                         const double grefl, const int res) {
+  printf("# ");
+  for (int i = 0; i < argc; i++) {
+    printf("%s ", argv[i]);
+  }
+  printf("\n");
+  printf("#Cloud cover: %g\n#Ground reflectance: %g\n#Sky map resolution: %d\n\n",
          cloud_cover, grefl, res);
 }
 
@@ -275,18 +325,22 @@ int gen_spect_sky(DATARRAY *tau_clear, DATARRAY *scat_clear,
     }
   }
 
-  write_rad_header(cloud_cover, grefl, res);
   write_rad(sun_radiance, sundir, skyfile, grndfile);
   return 1;
 }
 
-static DpPaths get_dppaths(const double aod, const char *tag) {
+static DpPaths get_dppaths(const char *dir, const double aod, const char *mname,
+                           const char *tag) {
   DpPaths paths;
 
-  snprintf(paths.tau, PATH_MAX, "tau_%s_%.2f.dat", tag, aod);
-  snprintf(paths.scat, PATH_MAX, "scat_%s_%.2f.dat", tag, aod);
-  snprintf(paths.scat1m, PATH_MAX, "scat1m_%s_%.2f.dat", tag, aod);
-  snprintf(paths.irrad, PATH_MAX, "irrad_%s_%.2f.dat", tag, aod);
+  snprintf(paths.tau, PATH_MAX, "%s%ctau_%s_%s_%.2f.dat", dir, DIRSEP, tag,
+           mname, aod);
+  snprintf(paths.scat, PATH_MAX, "%s%cscat_%s_%s_%.2f.dat", dir, DIRSEP, tag,
+           mname, aod);
+  snprintf(paths.scat1m, PATH_MAX, "%s%cscat1m_%s_%s_%.2f.dat", dir, DIRSEP,
+           tag, mname, aod);
+  snprintf(paths.irrad, PATH_MAX, "%s%cirrad_%s_%s_%.2f.dat", dir, DIRSEP, tag,
+           mname, aod);
 
   return paths;
 }
@@ -371,16 +425,18 @@ int main(int argc, char *argv[]) {
   double aod = AOD0_CA;
   char *outname = "out";
   char *mie_path = getpath("mie_ca.dat", getrlibpath(), R_OK);
-  char *mie_name = "mie_ca";
+  char mie_name[20] = "mie_ca";
   char lstag[3];
+  char *ddir = ".";
 
   if (!strcmp(argv[1], "-defaults")) {
-    printf("scattering order (-i): %d\n", sorder);
-    printf("ground reflectance (-g): %f\n", grefl);
-    printf("cloud cover (-c): %f\n", ccover);
-    printf("image resolution (-r): %d\n", res);
-    printf("broadband aerosol optical depth (-d): %f\n", AOD0_CA);
-    printf("out name (-f): %s\n", outname);
+    printf("-i %d\t\t\t\t#scattering order\n", sorder);
+    printf("-g %f\t\t\t#ground reflectance\n", grefl);
+    printf("-c %f\t\t\t#cloud cover\n", ccover);
+    printf("-r %d\t\t\t\t#image resolution\n", res);
+    printf("-d %f\t\t\t#broadband aerosol optical depth\n", AOD0_CA);
+    printf("-f %s\t\t\t\t#output name (-f)\n", outname);
+    printf("-p %s\t\t\t\t#atmos data directory\n", ddir);
     exit(1);
   }
 
@@ -415,21 +471,24 @@ int main(int argc, char *argv[]) {
       case 'a':
         s_latitude = atof(argv[++i]) * (PI / 180.0);
         break;
-      case 'g':
-        grefl = atof(argv[++i]);
-        break;
       case 'c':
         ccover = atof(argv[++i]);
         break;
       case 'd':
         aod = atof(argv[++i]);
         break;
+      case 'f':
+        outname = argv[++i];
+        break;
+      case 'g':
+        grefl = atof(argv[++i]);
+        break;
       case 'i':
         sorder = atoi(argv[++i]);
         break;
       case 'l':
         mie_path = argv[++i];
-        basename(mie_path, mie_name);
+        basename(mie_path, mie_name, sizeof(mie_name));
         break;
       case 'm':
         if (got_meridian) {
@@ -438,20 +497,20 @@ int main(int argc, char *argv[]) {
         }
         s_meridian = atof(argv[++i]) * (PI / 180.0);
         break;
-      case 'o':
-        s_longitude = atof(argv[++i]) * (PI / 180.0);
-        break;
       case 'n':
         num_threads = atoi(argv[++i]);
         break;
-      case 'y':
-        year = atoi(argv[++i]);
+      case 'o':
+        s_longitude = atof(argv[++i]) * (PI / 180.0);
         break;
-      case 'f':
-        outname = argv[++i];
+      case 'p':
+        ddir = argv[++i];
         break;
       case 'r':
         res = atoi(argv[++i]);
+        break;
+      case 'y':
+        year = atoi(argv[++i]);
         break;
       default:
         fprintf(stderr, "Unknown option %s\n", argv[i]);
@@ -483,7 +542,17 @@ int main(int argc, char *argv[]) {
   }
   clear_atmos.beta_m = mie_dp;
 
-  DpPaths clear_paths = get_dppaths(aod, lstag);
+  char gsdir[PATH_MAX];
+  size_t siz = strlen(ddir);
+  if (ISDIRSEP(ddir[siz-1]))
+    ddir[siz-1] = '\0';
+  snprintf(gsdir, PATH_MAX, "%s%catmos_data", ddir, DIRSEP);
+  printf("gsdir: %s\n", gsdir);
+  if (!make_directory(gsdir)) {
+    fprintf(stderr, "Failed creating atmos_data directory");
+    exit(1);
+  }
+  DpPaths clear_paths = get_dppaths(gsdir, aod, mie_name, lstag);
 
   if (getpath(clear_paths.tau, ".", R_OK) == NULL ||
       getpath(clear_paths.scat, ".", R_OK) == NULL ||
@@ -500,6 +569,8 @@ int main(int argc, char *argv[]) {
   DATARRAY *irrad_clear_dp = getdata(clear_paths.irrad);
   DATARRAY *scat_clear_dp = getdata(clear_paths.scat);
   DATARRAY *scat1m_clear_dp = getdata(clear_paths.scat1m);
+
+  write_header(argc, argv, ccover, grefl, res);
 
   if (!gen_spect_sky(tau_clear_dp, scat_clear_dp, scat1m_clear_dp,
                      irrad_clear_dp, ccover, sundir, grefl, res, outname)) {

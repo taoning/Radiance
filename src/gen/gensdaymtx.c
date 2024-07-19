@@ -1,6 +1,10 @@
 #include "atmos.h"
+#include "data.h"
 #include "paths.h"
 #include "rtmath.h"
+
+/* Degrees into radians */
+#define DegToRad(deg) ((deg) * (PI / 180.))
 
 char *progname;
 
@@ -9,6 +13,18 @@ inline void vectorize(double altitude, double azimuth, FVECT v) {
   v[0] = (v)[1] * sin(azimuth);
   v[1] *= cos(azimuth);
   v[2] = sin(altitude);
+}
+
+static const char *getfmtname(int fmt) {
+  switch (fmt) {
+  case 'a':
+    return ("ascii");
+  case 'f':
+    return ("float");
+  case 'd':
+    return ("double");
+  }
+  return ("unknown");
 }
 
 int rh_init(int rhsubdiv, float *rh_palt, float *rh_pazi, float *rh_dom) {
@@ -112,9 +128,9 @@ void add_direct(const double altitude, const double azimuth, const float cc,
     float val_add = wta[i] * dir_illum / (WHTEFFICACY * wtot);
 
     val_add /= (fixed_sun_sa > 0) ? fixed_sun_sa : rh_dom[near_patch[i]];
-    *pdest++ += val_add * suncolor[0];
-    *pdest++ += val_add * suncolor[1];
-    *pdest++ += val_add * suncolor[2];
+    for (int j = 0; j < NSSAMP; j++) {
+      *pdest++ += val_add * suncolor[j];
+    }
   }
 }
 
@@ -125,6 +141,70 @@ void calc_sky_patch_radiance(const int nskypatch, const float *rh_palt,
     printf("rh_palt[%d] = %f\n", i, rh_palt[i]);
     printf("rh_pazi[%d] = %f\n", i, rh_pazi[i]);
     get_sky_radiance(rh_palt[i], rh_pazi[i], radiance);
+  }
+}
+
+/* Return maximum of two doubles */
+static inline double dmax(double a, double b) { return (a > b) ? a : b; }
+
+/* Compute sky patch radiance values (modified by GW) */
+void ComputeSky(DATARRAY *tau, DATARRAY *scat, DATARRAY *scat1m,
+                DATARRAY *irrad, const FVECT sundir, float grefl,
+                float altitude, float *parr) {
+  int index; /* Category index */
+  int i;
+  float sun_zenith;
+  SCOLOR sky_radiance = {0};
+  SCOLOR ground_radiance = {0};
+  SCOLR sky_sclr = {0};
+  SCOLR ground_sclr = {0};
+  FVECT view_point = {0, 0, ER};
+  const double radius = VLEN(view_point);
+  const double sun_ct = fdot(view_point, sundir) / radius;
+  const FVECT rdir_grnd = {0, 0, -1};
+  const double mu_grnd = fdot(view_point, rdir_grnd) / radius;
+  const double nu_grnd = fdot(rdir_grnd, sundir);
+
+  /* Calculate sun zenith angle (don't let it dip below horizon) */
+  /* Also limit minimum angle to keep circumsolar off zenith */
+  if (altitude <= 0.0)
+    sun_zenith = DegToRad(90.0);
+  else if (altitude >= DegToRad(87.0))
+    sun_zenith = DegToRad(3.0);
+  else
+    sun_zenith = DegToRad(90.0) - altitude;
+
+  /* Compute ground radiance (include solar contribution if any) */
+  get_ground_radiance(tau, scat, scat1m, irrad, view_point, rdir_grnd, radius,
+                      mu_grnd, sun_ct, nu_grnd, grefl, sundir, ground_radiance);
+  scolor2scolr(ground_sclr, ground_radiance, 20);
+
+  if (bright(skycolor) <= 1e-4) { /* 0 sky component? */
+    memset(parr + 3, 0, sizeof(float) * 3 * (nskypatch - 1));
+    return;
+  }
+  /* Calculate Perez sky model parameters */
+  CalcPerezParam(sun_zenith, sky_clearness, sky_brightness, index);
+
+  /* Calculate sky patch luminance values */
+  calc_sky_patch_radiance(parr);
+
+  /* Calculate relative horizontal illuminance */
+  norm_diff_illum = CalcRelHorzIllum(parr);
+
+  /* Check for zero sky -- make uniform in that case */
+  if (norm_diff_illum <= FTINY) {
+    for (i = 1; i < nskypatch; i++)
+      setcolor(parr + 3 * i, 1., 1., 1.);
+    norm_diff_illum = PI;
+  }
+  /* Normalization coefficient */
+  norm_diff_illum = diff_illum / norm_diff_illum;
+
+  /* Apply to sky patches to get absolute radiance values */
+  for (i = 1; i < nskypatch; i++) {
+    scalecolor(parr + 3 * i, norm_diff_illum * (1. / WHTEFFICACY));
+    multcolor(parr + 3 * i, skycolor);
   }
 }
 
@@ -170,11 +250,25 @@ int main(int argc, char *argv[]) {
     goto fmterr;
   if (scanf("weather_data_file_units %d\n", &input) != 1)
     goto fmterr;
+
   int nskypatch = rh_init(rhsubdiv, rh_palt, rh_pazi, rh_dom);
+
+  fprintf(stderr, "%s: location '%s'\n", progname, buf);
+  fprintf(stderr, "%s: (lat,long)=(%.1f,%.1f) degrees north, west\n", progname,
+          s_latitude, s_longitude);
+  if (rotation != 0)
+    fprintf(stderr, "%s: rotating output %.0f degrees\n", progname, rotation);
   printf("nskypatch = %d\n", nskypatch);
+
+  s_latitude = DegToRad(s_latitude);
+  s_longitude = DegToRad(s_longitude);
+  s_meridian = DegToRad(s_meridian);
   /* initial allocation */
   mtx_data = resize_dmatrix(mtx_data, tstorage = 2, nskypatch);
+
   while (scanf("%d %d %lf %lf %lf\n", &mo, &da, &hr, &aod, &cc) == 5) {
+    double sda, sta;
+    int sun_in_sky;
     FVECT sundir;
     compute_sundir(0, mo, da, hr, 0, sundir);
     if (sun_hours_only && sundir[2] <= 0.)
@@ -187,8 +281,95 @@ int main(int argc, char *argv[]) {
       mtx_data = resize_dmatrix(mtx_data, tstorage, nskypatch);
     }
     ntsteps++; /* keep count of time steps */
+               /* compute sky patch values */
+    ComputeSky(mtx_data + mtx_offset);
+    AddDirect(mtx_data + mtx_offset);
+    /* update cumulative sky? */
+    for (i = 3 * nskypatch * (avgSky & (ntsteps > 1)); i--;)
+      mtx_data[i] += mtx_data[mtx_offset + i];
+    /* monthly reporting */
+    if (verbose && mo != last_monthly)
+      fprintf(stderr, "%s: stepping through month %d...\n", progname,
+              last_monthly = mo);
+    /* note whether leap-day was given */
   }
+  if (!ntsteps) {
+    fprintf(stderr, "%s: no valid time steps on input\n", progname);
+    exit(1);
+  }
+  /* check for junk at end */
+  while ((i = fgetc(stdin)) != EOF)
+    if (!isspace(i)) {
+      fprintf(stderr, "%s: warning - unexpected data past EOT: ", progname);
+      buf[0] = i;
+      buf[1] = '\0';
+      fgets(buf + 1, sizeof(buf) - 1, stdin);
+      fputs(buf, stderr);
+      fputc('\n', stderr);
+      break;
+    }
   return 0;
+  /* write out matrix */
+  if (outfmt != 'a')
+    SET_FILE_BINARY(stdout);
+#ifdef getc_unlocked
+  flockfile(stdout);
+#endif
+  if (verbose)
+    fprintf(stderr, "%s: writing %smatrix with %d time steps...\n", progname,
+            outfmt == 'a' ? "" : "binary ", nstored);
+  if (doheader) {
+    newheader("RADIANCE", stdout);
+    printargs(argc, argv, stdout);
+    printf("LATLONG= %.8f %.8f\n", RadToDeg(s_latitude),
+           -RadToDeg(s_longitude));
+    printf("NROWS=%d\n", nskypatch);
+    printf("NCOLS=%d\n", nstored);
+    printf("NCOMP=3\n");
+    if ((outfmt == 'f') | (outfmt == 'd'))
+      fputendian(stdout);
+    fputformat((char *)getfmtname(outfmt), stdout);
+    putchar('\n');
+  }
+  /* patches are rows (outer sort) */
+  for (i = 0; i < nskypatch; i++) {
+    mtx_offset = 3 * i;
+    switch (outfmt) {
+    case 'a':
+      for (j = 0; j < nstored; j++) {
+        printf("%.3g %.3g %.3g\n", mtx_data[mtx_offset],
+               mtx_data[mtx_offset + 1], mtx_data[mtx_offset + 2]);
+        mtx_offset += 3 * nskypatch;
+      }
+      if (nstored > 1)
+        fputc('\n', stdout);
+      break;
+    case 'f':
+      for (j = 0; j < nstored; j++) {
+        putbinary(mtx_data + mtx_offset, sizeof(float), 3, stdout);
+        mtx_offset += 3 * nskypatch;
+      }
+      break;
+    case 'd':
+      for (j = 0; j < nstored; j++) {
+        double ment[3];
+        ment[0] = mtx_data[mtx_offset];
+        ment[1] = mtx_data[mtx_offset + 1];
+        ment[2] = mtx_data[mtx_offset + 2];
+        putbinary(ment, sizeof(double), 3, stdout);
+        mtx_offset += 3 * nskypatch;
+      }
+      break;
+    }
+    if (ferror(stdout))
+      goto writerr;
+  }
+alldone:
+  if (fflush(NULL) == EOF)
+    goto writerr;
+  if (verbose)
+    fprintf(stderr, "%s: done.\n", progname);
+  exit(0);
 userr:
   fprintf(stderr,
           "Usage: %s [-v][-h][-A][-d|-s|-n][-u][-D file [-M modfile]][-r "
