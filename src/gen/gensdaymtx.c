@@ -1,18 +1,112 @@
 #include "atmos.h"
+#include "copyright.h"
 #include "data.h"
-#include "paths.h"
-#include "rtmath.h"
+#include "platform.h"
+#include "rtio.h"
+#include <ctype.h>
+#include <stdlib.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <errno.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#endif
 
+char *progname;
+const double DC_SolarConstantE = 1367.0; /* Solar constant W/m^2 */
+const double DC_SolarConstantL = 127.5;  /* Solar constant klux */
+
+double altitude;         /* Solar altitude (radians) */
+double azimuth;          /* Solar azimuth (radians) */
+double apwc;             /* Atmospheric precipitable water content */
+double dew_point = 11.0; /* Surface dew point temperature (deg. C) */
+double diff_illum;       /* Diffuse illuminance */
+double diff_irrad;       /* Diffuse irradiance */
+double dir_illum;        /* Direct illuminance */
+double dir_irrad;        /* Direct irradiance */
+int julian_date;         /* Julian date */
+double perez_param[5];   /* Perez sky model parameters */
+double sky_brightness;   /* Sky brightness */
+double sky_clearness;    /* Sky clearness */
+double solar_rad;        /* Solar radiance */
+double sun_zenith;       /* Sun zenith angle (radians) */
+int input = 0;           /* Input type */
+int output = 0;          /* Output type */
+FVECT sundir;
+
+const double ARCTIC_LAT = 67.;
+const double TROPIC_LAT = 23.;
+const int SUMMER_START = 4;
+const int SUMMER_END = 9;
+const double GNORM = 0.777778;
+
+const double D65EFF = 203.; /* standard illuminant D65 */
+
+// Mean normalized relative daylight spectra where CCT = 6415K for overcast;
+const double D6415[NSSAMP] = {0.63231, 1.06171, 1.00779, 1.36423, 1.34133,
+                              1.27258, 1.26276, 1.26352, 1.22201, 1.13246,
+                              1.0434,  1.05547, 0.98212, 0.94445, 0.9722,
+                              0.82387, 0.87853, 0.82559, 0.75111, 0.78925};
 /* Degrees into radians */
 #define DegToRad(deg) ((deg) * (PI / 180.))
 
-char *progname;
+/* Radiuans into degrees */
+#define RadToDeg(rad) ((rad) * (180. / PI))
+
+#ifndef NSUNPATCH
+#define NSUNPATCH 4 /* max. # patches to spread sun into */
+#endif
+
+#define SUN_ANG_DEG 0.533 /* sun full-angle in degrees */
+
+int nsuns = NSUNPATCH;    /* number of sun patches to use */
+double fixed_sun_sa = -1; /* fixed solid angle per sun? */
+
+int verbose = 0; /* progress reports to stderr? */
+
+int outfmt = 'a'; /* output format */
+
+int rhsubdiv = 1; /* Reinhart sky subdivisions */
+
+COLOR skycolor = {.96, 1.004, 1.118}; /* sky coloration */
+COLOR suncolor = {1., 1., 1.};        /* sun color */
+double grefl = .2;                    /* ground reflectance */
+
+int nskypatch;  /* number of Reinhart patches */
+float *rh_palt; /* sky patch altitudes (radians) */
+float *rh_pazi; /* sky patch azimuths (radians) */
+float *rh_dom;  /* sky patch solid angle (sr) */
+
+#define vector(v, alt, azi)                                                    \
+  ((v)[1] = cos(alt), (v)[0] = (v)[1] * sin(azi), (v)[1] *= cos(azi),          \
+   (v)[2] = sin(alt))
+
+#define rh_vector(v, i) vector(v, rh_palt[i], rh_pazi[i])
+
+#define rh_cos(i) tsin(rh_palt[i])
+
+#define solar_minute(jd, hr) ((24 * 60) * ((jd) - 1) + (int)((hr) * 60. + .5))
 
 inline void vectorize(double altitude, double azimuth, FVECT v) {
   v[1] = cos(altitude);
   v[0] = (v)[1] * sin(azimuth);
   v[1] *= cos(azimuth);
   v[2] = sin(altitude);
+}
+
+static int make_directory(const char *path) {
+#ifdef _WIN32
+  if (CreateDirectory(path, NULL) || GetLastError() == ERROR_ALREADY_EXISTS) {
+    return 1;
+  }
+  return 0;
+#else
+  if (mkdir(path, 0777) == 0 || errno == EEXIST) {
+    return 1;
+  }
+  return 0;
+#endif
 }
 
 static const char *getfmtname(int fmt) {
@@ -27,13 +121,39 @@ static const char *getfmtname(int fmt) {
   return ("unknown");
 }
 
-int rh_init(int rhsubdiv, float *rh_palt, float *rh_pazi, float *rh_dom) {
-  const int NROW = 7;
-  static const int tnaz[7] = {30, 30, 24, 24, 18, 12, 6};
+static inline double wmean2(const double a, const double b, const double x) {
+  return a * (1 - x) + b * x;
+}
+
+static inline double wmean(const double a, const double x, const double b,
+                           const double y) {
+  return (a * x + b * y) / (a + b);
+}
+
+static double get_zenith_brightness(const double sundir[3]) {
+  double zenithbr;
+  if (sundir[2] < 0) {
+    zenithbr = 0;
+  } else {
+    zenithbr = (8.6 * sundir[2] + .123) * 1000.0 / D65EFF;
+  }
+  return zenithbr;
+}
+
+// from gensky.c
+static double get_overcast_brightness(const double dz, const double zenithbr) {
+  double groundbr = zenithbr * GNORM;
+  return wmean(pow(dz + 1.01, 10), zenithbr * (1 + 2 * dz) / 3,
+               pow(dz + 1.01, -10), groundbr);
+}
+
+int rh_init(void) {
+#define NROW 7
+  static const int tnaz[NROW] = {30, 30, 24, 24, 18, 12, 6};
   const double alpha = (PI / 2.) / (NROW * rhsubdiv + .5);
   int p, i, j;
   /* allocate patch angle arrays */
-  int nskypatch = 0;
+  nskypatch = 0;
   for (p = 0; p < NROW; p++)
     nskypatch += tnaz[p];
   nskypatch *= rhsubdiv * rhsubdiv;
@@ -42,7 +162,7 @@ int rh_init(int rhsubdiv, float *rh_palt, float *rh_pazi, float *rh_dom) {
   rh_pazi = (float *)malloc(sizeof(float) * nskypatch);
   rh_dom = (float *)malloc(sizeof(float) * nskypatch);
   if ((rh_palt == NULL) | (rh_pazi == NULL) | (rh_dom == NULL)) {
-    fprintf(stderr, "gensskymtx: out of memory in rh_init()\n");
+    fprintf(stderr, "%s: out of memory in rh_init()\n", progname);
     exit(1);
   }
   rh_palt[0] = -PI / 2.; /* ground & zenith patches */
@@ -64,6 +184,7 @@ int rh_init(int rhsubdiv, float *rh_palt, float *rh_pazi, float *rh_dom) {
     }
   }
   return nskypatch;
+#undef NROW
 }
 
 /* Resize daylight matrix (GW) */
@@ -81,11 +202,88 @@ float *resize_dmatrix(float *mtx_data, int nsteps, int npatch) {
   return (mtx_data);
 }
 
+static Atmosphere init_atmos(const double aod, const double grefl) {
+  Atmosphere atmos = {.ozone_density = {.layers =
+                                            {
+                                                {.width = 25000.0,
+                                                 .exp_term = 0.0,
+                                                 .exp_scale = 0.0,
+                                                 .linear_term = 1.0 / 15000.0,
+                                                 .constant_term = -2.0 / 3.0},
+                                                {.width = AH,
+                                                 .exp_term = 0.0,
+                                                 .exp_scale = 0.0,
+                                                 .linear_term = -1.0 / 15000.0,
+                                                 .constant_term = 8.0 / 3.0},
+                                            }},
+                      .rayleigh_density = {.layers =
+                                               {
+                                                   {.width = AH,
+                                                    .exp_term = 1.0,
+                                                    .exp_scale = -1.0 / HR_MS,
+                                                    .linear_term = 0.0,
+                                                    .constant_term = 0.0},
+                                               }},
+                      .beta_r0 = BR0_MS,
+                      .beta_scale = aod / AOD0_CA,
+                      .beta_m = NULL,
+                      .grefl = grefl};
+  return atmos;
+}
+
+static DpPaths get_dppaths(const char *dir, const double aod, const char *mname,
+                           const char *tag) {
+  DpPaths paths;
+
+  snprintf(paths.tau, PATH_MAX, "%s%ctau_%s_%s_%.2f.dat", dir, DIRSEP, tag,
+           mname, aod);
+  snprintf(paths.scat, PATH_MAX, "%s%cscat_%s_%s_%.2f.dat", dir, DIRSEP, tag,
+           mname, aod);
+  snprintf(paths.scat1m, PATH_MAX, "%s%cscat1m_%s_%s_%.2f.dat", dir, DIRSEP,
+           tag, mname, aod);
+  snprintf(paths.irrad, PATH_MAX, "%s%cirrad_%s_%s_%.2f.dat", dir, DIRSEP, tag,
+           mname, aod);
+
+  return paths;
+}
+static void set_rayleigh_density_profile(Atmosphere *atmos, char *tag,
+                                         const int is_summer,
+                                         const double s_latitude) {
+  // Set rayleigh density profile
+  if (fabs(s_latitude * 180.0 / PI) > ARCTIC_LAT) {
+    tag[0] = 's';
+    if (is_summer) {
+      tag[1] = 's';
+      atmos->rayleigh_density.layers[0].exp_scale = -1.0 / HR_SS;
+      atmos->beta_r0 = BR0_SS;
+    } else {
+      tag[1] = 'w';
+      atmos->rayleigh_density.layers[0].exp_scale = -1.0 / HR_SW;
+      atmos->beta_r0 = BR0_SW;
+    }
+  } else if (fabs(s_latitude * 180.0 / PI) > TROPIC_LAT) {
+    tag[0] = 'm';
+    if (is_summer) {
+      tag[1] = 's';
+      atmos->rayleigh_density.layers[0].exp_scale = -1.0 / HR_MS;
+      atmos->beta_r0 = BR0_MS;
+    } else {
+      tag[1] = 'w';
+      atmos->rayleigh_density.layers[0].exp_scale = -1.0 / HR_MW;
+      atmos->beta_r0 = BR0_MW;
+    }
+  } else {
+    tag[0] = 't';
+    tag[1] = 'r';
+    atmos->rayleigh_density.layers[0].exp_scale = -1.0 / HR_T;
+    atmos->beta_r0 = BR0_T;
+  }
+  tag[2] = '\0';
+}
 /* Add in solar direct to nearest sky patches (GW) */
 void add_direct(const double altitude, const double azimuth, const float cc,
                 const int nskypatch, const float *rh_alt, const float *rh_azi,
                 float *parr) {
-  const int NSUNPATCH = 4;
   int nsuns = NSUNPATCH;
   FVECT svec;
   double near_dprod[NSUNPATCH];
@@ -134,13 +332,44 @@ void add_direct(const double altitude, const double azimuth, const float cc,
   }
 }
 
-void calc_sky_patch_radiance(const int nskypatch, const float *rh_palt,
-                             const float *rh_pazi, float *radiance) {
+void calc_sky_patch_radiance(DATARRAY *scat, DATARRAY *scat1m, double ccover, float *parr) {
   int i;
-  for (i = 0; i < nskypatch; i++) {
+  double aas;  /* Sun-sky point azimuthal angle */
+  double sspa; /* Sun-sky point angle */
+  double zsa;  /* Zenithal sun angle */
+  FVECT view_point = {0, 0, ER};
+  double radius = ER;
+  double sun_ct = fdot(view_point, sundir) / radius;
+  for (i = 1; i < nskypatch; i++) {
     printf("rh_palt[%d] = %f\n", i, rh_palt[i]);
     printf("rh_pazi[%d] = %f\n", i, rh_pazi[i]);
-    get_sky_radiance(rh_palt[i], rh_pazi[i], radiance);
+    FVECT rdir_sky;
+    rdir_sky[0] = -sin(rh_pazi[i]) * cos(rh_palt[i]);
+    rdir_sky[1] = -cos(rh_pazi[i]) * cos(rh_palt[i]);
+    rdir_sky[2] = sin(rh_palt[i]);
+    const double mu_sky = fdot(view_point, rdir_sky) / radius;
+    const double nu_sky = fdot(rdir_sky, sundir);
+    SCOLOR sky_radiance = {0};
+
+    get_sky_radiance(scat, scat1m, radius, mu_sky, sun_ct, nu_sky,
+                     sky_radiance);
+    for (int k = 0; k < NSSAMP; ++k) {
+      sky_radiance[k] *= WVLSPAN;
+    }
+
+    if (ccover > 0) {
+      double zenithbr = get_zenith_brightness(sundir);
+      double grndbr = zenithbr * GNORM;
+      double skybr = get_overcast_brightness(rdir_sky[2], zenithbr);
+      for (int k = 0; k < NSSAMP; ++k) {
+        sky_radiance[k] =
+            wmean2(sky_radiance[k], skybr * D6415[k], ccover);
+      }
+    }
+
+    for (int k = 0; k < NSSAMP; ++k) {
+      parr[NSSAMP * i + k] = sky_radiance[k];
+    }
   }
 }
 
@@ -149,8 +378,7 @@ static inline double dmax(double a, double b) { return (a > b) ? a : b; }
 
 /* Compute sky patch radiance values (modified by GW) */
 void ComputeSky(DATARRAY *tau, DATARRAY *scat, DATARRAY *scat1m,
-                DATARRAY *irrad, const FVECT sundir, float grefl,
-                float altitude, float *parr) {
+                DATARRAY *irrad, double ccover, float *parr) {
   int index; /* Category index */
   int i;
   float sun_zenith;
@@ -177,17 +405,17 @@ void ComputeSky(DATARRAY *tau, DATARRAY *scat, DATARRAY *scat1m,
   /* Compute ground radiance (include solar contribution if any) */
   get_ground_radiance(tau, scat, scat1m, irrad, view_point, rdir_grnd, radius,
                       mu_grnd, sun_ct, nu_grnd, grefl, sundir, ground_radiance);
-  scolor2scolr(ground_sclr, ground_radiance, 20);
+  scolor2scolr(ground_sclr, ground_radiance, NSSAMP);
 
   if (bright(skycolor) <= 1e-4) { /* 0 sky component? */
     memset(parr + 3, 0, sizeof(float) * 3 * (nskypatch - 1));
     return;
   }
   /* Calculate Perez sky model parameters */
-  CalcPerezParam(sun_zenith, sky_clearness, sky_brightness, index);
+  // CalcPerezParam(sun_zenith, sky_clearness, sky_brightness, index);
 
   /* Calculate sky patch luminance values */
-  calc_sky_patch_radiance(parr);
+  calc_sky_patch_radiance(scat, scat1m, ccover, parr);
 
   /* Calculate relative horizontal illuminance */
   norm_diff_illum = CalcRelHorzIllum(parr);
@@ -209,33 +437,88 @@ void ComputeSky(DATARRAY *tau, DATARRAY *scat, DATARRAY *scat1m,
 }
 
 int main(int argc, char *argv[]) {
-  progname = argv[0];
-  float *mtx_data = NULL;
-  int mtx_offset = 0;
+
   char buf[256];
-  int rhsubdiv = 1;
-  int input = 0;
+  int doheader = 1; /* output header? */
   double rotation = 0.0;
   double elevation = 0;
-  int ntsteps = 0;  /* number of time steps */
-  int tstorage = 0; /* number of allocated time steps */
-  int nstored = 0;  /* number of time steps in matrix */
-  int sun_hours_only = 0;
+  int leap_day = 0;       /* add leap day? */
+  int sun_hours_only = 0; /* only output sun hours? */
+  float *mtx_data = NULL;
+  int ntsteps = 0;      /* number of time steps */
+  int tstorage = 0;     /* number of allocated time steps */
+  int nstored = 0;      /* number of time steps in matrix */
+  int last_monthly = 0; /* month of last report */
   int mo, da;
   double hr, aod, cc;
-  float *rh_palt, *rh_pazi, *rh_dom;
+  int mtx_offset = 0;
+  int i, j;
+  char lstag[3];
+  char *mie_path = getpath("mie_ca.dat", getrlibpath(), R_OK);
+  char *ddir = ".";
+  char mie_name[20] = "mie_ca";
+  int num_threads = 1;
+  int sorder = 4;
+
+  progname = argv[0];
+
   for (int i = 1; i < argc && argv[i][0] == '-'; i++) {
     switch (argv[i][1]) {
+    case 'g':
+      grefl = atof(argv[++i]);
+      break;
     case 'm':
       rhsubdiv = atoi(argv[++i]);
       break;
-    case 'r':
+    case 'r': /* rotate distribution */
+      if (argv[i][2] && argv[i][2] != 'z')
+        goto userr;
       rotation = atof(argv[++i]);
       break;
     case 'u': /* solar hours only */
       sun_hours_only = 1;
       break;
+    case 'v': /* verbose progress reports */
+      verbose++;
+      break;
+    case 'h': /* turn off header */
+      doheader = 0;
+      break;
+    case '5': /* 5-phase calculation */
+      nsuns = 1;
+      fixed_sun_sa = PI / 360. * atof(argv[++i]);
+      if (fixed_sun_sa <= 0) {
+        fprintf(stderr,
+                "%s: missing solar disk size argument for '-5' option\n",
+                progname);
+        exit(1);
+      }
+      fixed_sun_sa *= fixed_sun_sa * PI;
+      break;
+    case 'o': /* output format */
+      switch (argv[i][2]) {
+      case 'f':
+      case 'd':
+      case 'a':
+        outfmt = argv[i][2];
+        break;
+      default:
+        goto userr;
+      }
+      break;
     }
+  }
+  if (i < argc - 1)
+    goto userr;
+  if (i == argc - 1 && freopen(argv[i], "r", stdin) == NULL) {
+    fprintf(stderr, "%s: cannot open '%s' for input\n", progname, argv[i]);
+    exit(1);
+  }
+  if (verbose) {
+    if (i == argc - 1)
+      fprintf(stderr, "%s: reading weather tape '%s'\n", progname, argv[i]);
+    else
+      fprintf(stderr, "%s: reading weather tape from <stdin>\n", progname);
   }
   /* read weather tape header */
   if (scanf("place %[^\r\n] ", buf) != 1)
@@ -251,14 +534,14 @@ int main(int argc, char *argv[]) {
   if (scanf("weather_data_file_units %d\n", &input) != 1)
     goto fmterr;
 
-  int nskypatch = rh_init(rhsubdiv, rh_palt, rh_pazi, rh_dom);
-
-  fprintf(stderr, "%s: location '%s'\n", progname, buf);
-  fprintf(stderr, "%s: (lat,long)=(%.1f,%.1f) degrees north, west\n", progname,
-          s_latitude, s_longitude);
-  if (rotation != 0)
-    fprintf(stderr, "%s: rotating output %.0f degrees\n", progname, rotation);
-  printf("nskypatch = %d\n", nskypatch);
+  rh_init();
+  if (verbose) {
+    fprintf(stderr, "%s: location '%s'\n", progname, buf);
+    fprintf(stderr, "%s: (lat,long)=(%.1f,%.1f) degrees north, west\n",
+            progname, s_latitude, s_longitude);
+    if (rotation != 0)
+      fprintf(stderr, "%s: rotating output %.0f degrees\n", progname, rotation);
+  }
 
   s_latitude = DegToRad(s_latitude);
   s_longitude = DegToRad(s_longitude);
@@ -269,10 +552,25 @@ int main(int argc, char *argv[]) {
   while (scanf("%d %d %lf %lf %lf\n", &mo, &da, &hr, &aod, &cc) == 5) {
     double sda, sta;
     int sun_in_sky;
-    FVECT sundir;
-    compute_sundir(0, mo, da, hr, 0, sundir);
+    /* compute solar position */
+    if ((mo == 2) & (da == 29)) {
+      julian_date = 60;
+      leap_day = 1;
+    } else
+      julian_date = jdate(mo, da) + leap_day;
+    sda = sdec(julian_date);
+    sta = stadj(julian_date);
+    altitude = salt(sda, hr + sta);
+    sun_in_sky = (altitude > -DegToRad(SUN_ANG_DEG / 2.));
     if (sun_hours_only && sundir[2] <= 0.)
       continue; /* skipping nighttime points */
+
+    azimuth = sazi(sda, hr + sta) + PI - DegToRad(rotation);
+
+    sundir[0] = -sin(azimuth) * cos(altitude);
+    sundir[1] = -cos(azimuth) * cos(altitude);
+    sundir[2] = sin(altitude);
+
     mtx_offset = NSSAMP * nskypatch * nstored;
     nstored += !nstored;
     /* make space for next row */
@@ -282,10 +580,55 @@ int main(int argc, char *argv[]) {
     }
     ntsteps++; /* keep count of time steps */
                /* compute sky patch values */
-    ComputeSky(mtx_data + mtx_offset);
-    AddDirect(mtx_data + mtx_offset);
+    Atmosphere clear_atmos = init_atmos(aod, grefl);
+    int is_summer = (mo >= SUMMER_START && mo <= SUMMER_END);
+    if (s_latitude < 0) {
+      is_summer = !is_summer;
+    }
+    set_rayleigh_density_profile(&clear_atmos, lstag, is_summer, s_latitude);
+
+    // Load mie density data
+    DATARRAY *mie_dp = getdata(mie_path);
+    if (mie_dp == NULL) {
+      fprintf(stderr, "Error reading mie data\n");
+      return 0;
+    }
+    clear_atmos.beta_m = mie_dp;
+
+    char gsdir[PATH_MAX];
+    size_t siz = strlen(ddir);
+    if (ISDIRSEP(ddir[siz - 1]))
+      ddir[siz - 1] = '\0';
+    snprintf(gsdir, PATH_MAX, "%s%catmos_data", ddir, DIRSEP);
+    printf("gsdir: %s\n", gsdir);
+    if (!make_directory(gsdir)) {
+      fprintf(stderr, "Failed creating atmos_data directory");
+      exit(1);
+    }
+    DpPaths clear_paths = get_dppaths(gsdir, aod, mie_name, lstag);
+
+    if (getpath(clear_paths.tau, ".", R_OK) == NULL ||
+        getpath(clear_paths.scat, ".", R_OK) == NULL ||
+        getpath(clear_paths.scat1m, ".", R_OK) == NULL ||
+        getpath(clear_paths.irrad, ".", R_OK) == NULL) {
+      printf("# Pre-computing...\n");
+      if (!precompute(sorder, clear_paths, &clear_atmos, num_threads)) {
+        fprintf(stderr, "Pre-compute failed\n");
+        return 0;
+      }
+    }
+
+    DATARRAY *tau_clear_dp = getdata(clear_paths.tau);
+    DATARRAY *irrad_clear_dp = getdata(clear_paths.irrad);
+    DATARRAY *scat_clear_dp = getdata(clear_paths.scat);
+    DATARRAY *scat1m_clear_dp = getdata(clear_paths.scat1m);
+
+    ComputeSky(tau_clear_dp, scat_clear_dp, scat1m_clear_dp, irrad_clear_dp, cc,
+               mtx_data + mtx_offset);
+    AddDirect(tau_clear_dp, scat_clear_dp, scat1m_clear_dp, irrad_clear_dp,
+              mtx_data + mtx_offset);
     /* update cumulative sky? */
-    for (i = 3 * nskypatch * (avgSky & (ntsteps > 1)); i--;)
+    for (i = 3 * nskypatch * (ntsteps > 1); i--;)
       mtx_data[i] += mtx_data[mtx_offset + i];
     /* monthly reporting */
     if (verbose && mo != last_monthly)
