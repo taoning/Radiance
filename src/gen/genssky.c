@@ -429,7 +429,7 @@ int main(int argc, char *argv[]) {
   char lstag[3];
   char *ddir = ".";
 
-  if (!strcmp(argv[1], "-defaults")) {
+  if (argc == 2 && !strcmp(argv[1], "-defaults")) {
     printf("-i %d\t\t\t\t#scattering order\n", sorder);
     printf("-g %f\t\t\t#ground reflectance\n", grefl);
     printf("-c %f\t\t\t#cloud cover\n", ccover);
@@ -437,7 +437,7 @@ int main(int argc, char *argv[]) {
     printf("-d %f\t\t\t#broadband aerosol optical depth\n", AOD0_CA);
     printf("-f %s\t\t\t\t#output name (-f)\n", outname);
     printf("-p %s\t\t\t\t#atmos data directory\n", ddir);
-    exit(1);
+    exit(0);
   }
 
   if (argc < 4) {
@@ -547,7 +547,6 @@ int main(int argc, char *argv[]) {
   if (ISDIRSEP(ddir[siz-1]))
     ddir[siz-1] = '\0';
   snprintf(gsdir, PATH_MAX, "%s%catmos_data", ddir, DIRSEP);
-  printf("gsdir: %s\n", gsdir);
   if (!make_directory(gsdir)) {
     fprintf(stderr, "Failed creating atmos_data directory");
     exit(1);
