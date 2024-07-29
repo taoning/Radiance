@@ -122,11 +122,16 @@ int main( int argc, char  *argv[])
 			fscanf(EPW_FILE,",%f",&dummy_float);
 			fscanf(EPW_FILE,",%f",&dummy_float);
 			fscanf(EPW_FILE,",%f",&dummy_float);
+			fscanf(EPW_FILE,",%d",&cc);
 			fscanf(EPW_FILE,",%f",&dummy_float);
 			fscanf(EPW_FILE,",%f",&dummy_float);
+			fscanf(EPW_FILE,",%f",&dummy_float);
+			fscanf(EPW_FILE,",%f",&dummy_float);
+			fscanf(EPW_FILE,",%f",&dummy_float);
+			fscanf(EPW_FILE,",%f",&dummy_float);
+			fscanf(EPW_FILE,",%f",&aod);
 
-			fscanf(EPW_FILE,",%f,%d",&aod, &cc);
-			fprintf(WEA_FILE," %.0f %d",aod, cc);
+			fprintf(WEA_FILE," %.3f %.1f",aod, cc/10.);
 			
 		}
 

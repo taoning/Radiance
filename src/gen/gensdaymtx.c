@@ -14,8 +14,6 @@
 #endif
 
 char *progname;
-const double DC_SolarConstantE = 1367.0; /* Solar constant W/m^2 */
-const double DC_SolarConstantL = 127.5;  /* Solar constant klux */
 
 double altitude;         /* Solar altitude (radians) */
 double azimuth;          /* Solar azimuth (radians) */
@@ -43,7 +41,7 @@ const double GNORM = 0.777778;
 
 const double D65EFF = 203.; /* standard illuminant D65 */
 
-// Mean normalized relative daylight spectra where CCT = 6415K for overcast;
+/* Mean normalized relative daylight spectra where CCT = 6415K for overcast */
 const double D6415[NSSAMP] = {0.63231, 1.06171, 1.00779, 1.36423, 1.34133,
                               1.27258, 1.26276, 1.26352, 1.22201, 1.13246,
                               1.0434,  1.05547, 0.98212, 0.94445, 0.9722,
@@ -142,7 +140,7 @@ static double get_zenith_brightness(const double sundir[3]) {
   return zenithbr;
 }
 
-// from gensky.c
+/* from gensky.c */
 static double get_overcast_brightness(const double dz, const double zenithbr) {
   double groundbr = zenithbr * GNORM;
   return wmean(pow(dz + 1.01, 10), zenithbr * (1 + 2 * dz) / 3,
@@ -251,7 +249,7 @@ static DpPaths get_dppaths(const char *dir, const double aod, const char *mname,
 static void set_rayleigh_density_profile(Atmosphere *atmos, char *tag,
                                          const int is_summer,
                                          const double s_latitude) {
-  // Set rayleigh density profile
+  /* Set rayleigh density profile */
   if (fabs(s_latitude * 180.0 / PI) > ARCTIC_LAT) {
     tag[0] = 's';
     if (is_summer) {
@@ -311,28 +309,26 @@ void add_direct(DATARRAY *tau, DATARRAY *scat, DATARRAY *scat1m,
         break;
       }
   }
-  wtot = 0; /* weight by proximity */
+  /* Get solar radiance */
+  double sun_radiance[NSSAMP] = {0};
+  get_solar_radiance(tau, scat, scat1m, sundir, ER, sun_ct, sun_radiance);
+  if (ccover > 0) {
+    double zenithbr = get_zenith_brightness(sundir);
+    double skybr = get_overcast_brightness(sundir[2], zenithbr);
+    for (int l = 0; l < NSSAMP; ++l) {
+      sun_radiance[l] =
+          wmean2(sun_radiance[l], D6415[l] * skybr / WVLSPAN, ccover);
+    }
+  }
+  /* weight by proximity */
+  wtot = 0;
   for (i = nsuns; i--;)
     wtot += wta[i] = 1. / (1.002 - near_dprod[i]);
   /* add to nearest patch radiances */
   for (i = nsuns; i--;) {
-    float *pdest = parr + 3 * near_patch[i];
-    // float val_add = wta[i] * dir_illum / (WHTEFFICACY * wtot);
-    // Get solar radiance
-    double sun_radiance[NSSAMP] = {0};
-    get_solar_radiance(tau, scat, scat1m, sundir, ER, sun_ct, sun_radiance);
-    if (ccover > 0) {
-      double zenithbr = get_zenith_brightness(sundir);
-      double skybr = get_overcast_brightness(sundir[2], zenithbr);
-      for (int i = 0; i < NSSAMP; ++i) {
-        sun_radiance[i] =
-            wmean2(sun_radiance[i], D6415[i] * skybr / WVLSPAN, ccover);
-      }
-    }
-
-    double fix_sa = (fixed_sun_sa > 0) ? fixed_sun_sa : rh_dom[near_patch[i]];
-    for (int j = 0; j < NSSAMP; j++) {
-      *pdest++ += sun_radiance[j] * wta[i] / wtot / fix_sa;
+    float *pdest = parr + NSSAMP * near_patch[i];
+    for (int k = 0; k < NSSAMP; k++) {
+      *pdest++ = sun_radiance[k] * wta[i] / wtot;
     }
   }
 }
@@ -340,21 +336,18 @@ void add_direct(DATARRAY *tau, DATARRAY *scat, DATARRAY *scat1m,
 void calc_sky_patch_radiance(DATARRAY *scat, DATARRAY *scat1m, double ccover,
                              float *parr) {
   int i;
-  double aas;  /* Sun-sky point azimuthal angle */
-  double sspa; /* Sun-sky point angle */
-  double zsa;  /* Zenithal sun angle */
+  double mu_sky; /* Sun-sky point azimuthal angle */
+  double sspa;   /* Sun-sky point angle */
+  double zsa;    /* Zenithal sun angle */
   FVECT view_point = {0, 0, ER};
   for (i = 1; i < nskypatch; i++) {
-    printf("rh_palt[%d] = %f\n", i, rh_palt[i]);
-    printf("rh_pazi[%d] = %f\n", i, rh_pazi[i]);
     FVECT rdir_sky;
     vectorize(rh_palt[i], rh_pazi[i], rdir_sky);
-    const double mu_sky = fdot(view_point, rdir_sky) / ER;
-    const double nu_sky = fdot(rdir_sky, sundir);
+    mu_sky = fdot(view_point, rdir_sky) / ER;
+    sspa = fdot(rdir_sky, sundir);
     SCOLOR sky_radiance = {0};
 
-    get_sky_radiance(scat, scat1m, ER, mu_sky, sun_ct, nu_sky,
-                     sky_radiance);
+    get_sky_radiance(scat, scat1m, ER, mu_sky, sun_ct, sspa, sky_radiance);
     for (int k = 0; k < NSSAMP; ++k) {
       sky_radiance[k] *= WVLSPAN;
     }
@@ -405,31 +398,11 @@ void compute_sky(DATARRAY *tau, DATARRAY *scat, DATARRAY *scat1m,
 
   /* Compute ground radiance (include solar contribution if any) */
   get_ground_radiance(tau, scat, scat1m, irrad, view_point, rdir_grnd, radius,
-                      mu_grnd, sun_ct, nu_grnd, grefl, sundir, ground_radiance);
-  scolor2scolr(ground_sclr, ground_radiance, NSSAMP);
-
-  /* Calculate Perez sky model parameters */
-  // CalcPerezParam(sun_zenith, sky_clearness, sky_brightness, index);
-
-  /* Calculate sky patch luminance values */
+                      mu_grnd, sun_ct, nu_grnd, grefl, sundir, parr);
+  for (int j = 0; j < NSSAMP; j++) {
+    parr[j] *= WVLSPAN;
+  }
   calc_sky_patch_radiance(scat, scat1m, ccover, parr);
-
-  /* Calculate relative horizontal illuminance */
-  // norm_diff_illum = CalcRelHorzIllum(parr);
-
-  /* Check for zero sky -- make uniform in that case */
-  // if (norm_diff_illum <= FTINY) {
-  //   for (i = 1; i < nskypatch; i++)
-  //     setcolor(parr + 3 * i, 1., 1., 1.);
-  //   norm_diff_illum = PI;
-  // }
-  /* Normalization coefficient */
-  // norm_diff_illum = diff_illum / norm_diff_illum;
-
-  /* Apply to sky patches to get absolute radiance values */
-  // for (i = 1; i < nskypatch; i++) {
-    // scalecolor(parr + NSSAMP * i, norm_diff_illum);
-  // }
 }
 
 int main(int argc, char *argv[]) {
@@ -447,6 +420,7 @@ int main(int argc, char *argv[]) {
   int last_monthly = 0; /* month of last report */
   int mo, da;
   double hr, aod, cc;
+  double dni, dhi;
   int mtx_offset = 0;
   int i, j;
   char lstag[3];
@@ -455,17 +429,24 @@ int main(int argc, char *argv[]) {
   char mie_name[20] = "mie_ca";
   int num_threads = 1;
   int sorder = 4;
+  int solar_only = 0;
   FVECT view_point = {0, 0, ER};
 
   progname = argv[0];
 
-  for (int i = 1; i < argc && argv[i][0] == '-'; i++) {
+  for (i = 1; i < argc && argv[i][0] == '-'; i++) {
     switch (argv[i][1]) {
+    case 'd': /* solar (direct) only */
+      solar_only = 1;
+      break;
     case 'g':
       grefl = atof(argv[++i]);
       break;
     case 'm':
       rhsubdiv = atoi(argv[++i]);
+      break;
+    case 'n':
+      num_threads = atoi(argv[++i]);
       break;
     case 'r': /* rotate distribution */
       if (argv[i][2] && argv[i][2] != 'z')
@@ -503,6 +484,8 @@ int main(int argc, char *argv[]) {
         goto userr;
       }
       break;
+    default:
+      goto userr;
     }
   }
   if (i < argc - 1)
@@ -546,7 +529,15 @@ int main(int argc, char *argv[]) {
   /* initial allocation */
   mtx_data = resize_dmatrix(mtx_data, tstorage = 2, nskypatch);
 
-  while (scanf("%d %d %lf %lf %lf\n", &mo, &da, &hr, &aod, &cc) == 5) {
+  /* Load mie density data */
+  DATARRAY *mie_dp = getdata(mie_path);
+  if (mie_dp == NULL) {
+    fprintf(stderr, "Error reading mie data\n");
+    return 0;
+  }
+
+  while (scanf("%d %d %lf %lf %lf %lf %lf\n", &mo, &da, &hr, &dni, &dhi, &aod,
+               &cc) == 7) {
     double sda, sta;
     int sun_in_sky;
     /* compute solar position */
@@ -559,16 +550,17 @@ int main(int argc, char *argv[]) {
     sta = stadj(julian_date);
     altitude = salt(sda, hr + sta);
     sun_in_sky = (altitude > -DegToRad(SUN_ANG_DEG / 2.));
-    if (sun_hours_only && sundir[2] <= 0.)
-      continue; /* skipping nighttime points */
 
     azimuth = sazi(sda, hr + sta) + PI - DegToRad(rotation);
 
     vectorize(altitude, azimuth, sundir);
+    if (sun_hours_only && sundir[2] <= 0.) {
+      continue; /* skipping nighttime points */
+    }
     sun_ct = fdot(view_point, sundir) / ER;
 
     mtx_offset = NSSAMP * nskypatch * nstored;
-    nstored += !nstored;
+    nstored += 1;
     /* make space for next row */
     if (nstored > tstorage) {
       tstorage += (tstorage >> 1) + nstored + 7;
@@ -583,12 +575,6 @@ int main(int argc, char *argv[]) {
     }
     set_rayleigh_density_profile(&clear_atmos, lstag, is_summer, s_latitude);
 
-    // Load mie density data
-    DATARRAY *mie_dp = getdata(mie_path);
-    if (mie_dp == NULL) {
-      fprintf(stderr, "Error reading mie data\n");
-      return 0;
-    }
     clear_atmos.beta_m = mie_dp;
 
     char gsdir[PATH_MAX];
@@ -596,7 +582,6 @@ int main(int argc, char *argv[]) {
     if (ISDIRSEP(ddir[siz - 1]))
       ddir[siz - 1] = '\0';
     snprintf(gsdir, PATH_MAX, "%s%catmos_data", ddir, DIRSEP);
-    printf("gsdir: %s\n", gsdir);
     if (!make_directory(gsdir)) {
       fprintf(stderr, "Failed creating atmos_data directory");
       exit(1);
@@ -619,8 +604,9 @@ int main(int argc, char *argv[]) {
     DATARRAY *scat_clear_dp = getdata(clear_paths.scat);
     DATARRAY *scat1m_clear_dp = getdata(clear_paths.scat1m);
 
-    compute_sky(tau_clear_dp, scat_clear_dp, scat1m_clear_dp, irrad_clear_dp,
-                cc, mtx_data + mtx_offset);
+    if (!solar_only)
+      compute_sky(tau_clear_dp, scat_clear_dp, scat1m_clear_dp, irrad_clear_dp,
+                  cc, mtx_data + mtx_offset);
     add_direct(tau_clear_dp, scat_clear_dp, scat1m_clear_dp, irrad_clear_dp, cc,
                mtx_data + mtx_offset);
     /* update cumulative sky? */
@@ -632,12 +618,12 @@ int main(int argc, char *argv[]) {
               last_monthly = mo);
     /* note whether leap-day was given */
 
-    freedata(mie_dp);
     freedata(tau_clear_dp);
-    freedata(scat_clear_dp);
     freedata(irrad_clear_dp);
+    freedata(scat_clear_dp);
     freedata(scat1m_clear_dp);
   }
+  freedata(mie_dp);
   if (!ntsteps) {
     fprintf(stderr, "%s: no valid time steps on input\n", progname);
     exit(1);
@@ -653,7 +639,6 @@ int main(int argc, char *argv[]) {
       fputc('\n', stderr);
       break;
     }
-  return 0;
   /* write out matrix */
   if (outfmt != 'a')
     SET_FILE_BINARY(stdout);
@@ -682,8 +667,10 @@ int main(int argc, char *argv[]) {
     switch (outfmt) {
     case 'a':
       for (j = 0; j < nstored; j++) {
-        printf("%.3g %.3g %.3g\n", mtx_data[mtx_offset],
-               mtx_data[mtx_offset + 1], mtx_data[mtx_offset + 2]);
+        for (int k = 0; k < NSSAMP; k++) {
+          printf("%.3g \n", mtx_data[mtx_offset + k]);
+        }
+        printf("\n");
         mtx_offset += NSSAMP * nskypatch;
       }
       if (nstored > 1)
