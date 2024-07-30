@@ -1,5 +1,7 @@
-// Main function for generating spectral sky
-// Cloudy sky computed as weight average of clear and cie overcast sky
+/*
+Main function for generating spectral sky
+Cloudy sky computed as weight average of clear and cie overcast sky
+*/
 
 #include "atmos.h"
 #include "copyright.h"
@@ -25,7 +27,7 @@ const double GNORM = 0.777778;
 
 const double D65EFF = 203.; /* standard illuminant D65 */
 
-// Mean normalized relative daylight spectra where CCT = 6415K for overcast;
+/* Mean normalized relative daylight spectra where CCT = 6415K for overcast; */
 const double D6415[NSSAMP] = {0.63231, 1.06171, 1.00779, 1.36423, 1.34133,
                               1.27258, 1.26276, 1.26352, 1.22201, 1.13246,
                               1.0434,  1.05547, 0.98212, 0.94445, 0.9722,
@@ -168,7 +170,7 @@ static double get_zenith_brightness(const double sundir[3]) {
   return zenithbr;
 }
 
-// from gensky.c
+/* from gensky.c */
 static double get_overcast_brightness(const double dz, const double zenithbr) {
   double groundbr = zenithbr * GNORM;
   return wmean(pow(dz + 1.01, 10), zenithbr * (1 + 2 * dz) / 3,
@@ -192,7 +194,7 @@ static void write_rad(const double *sun_radiance, const FVECT sundir,
                       const char grndfile[PATH_MAX]) {
   if (sundir[2] > 0) {
     printf("void spectrum sunrad\n0\n0\n22 380 780 ");
-    // Normalize to one
+    /* Normalize to one */
     double sum = 0.0;
     for (int i = 0; i < NSSAMP; ++i) {
       sum += sun_radiance[i];
@@ -218,8 +220,7 @@ static void write_rad(const double *sun_radiance, const FVECT sundir,
 }
 
 static void write_hsr_header(FILE *fp, RESOLU *res) {
-  float wvsplit[4] = {380, 480, 588,
-                      780}; // RGB wavelength limits+partitions (nm)
+  float wvsplit[4] = {380, 480, 588, 780};
   newheader("RADIANCE", fp);
   fputncomp(NSSAMP, fp);
   fputwlsplit(wvsplit, fp);
@@ -228,9 +229,7 @@ static void write_hsr_header(FILE *fp, RESOLU *res) {
   fputsresolu(res, fp);
 }
 
-static inline float frac(float x) {
-  return x - floor(x);
-}
+static inline float frac(float x) { return x - floor(x); }
 
 int gen_spect_sky(DATARRAY *tau_clear, DATARRAY *scat_clear,
                   DATARRAY *scat1m_clear, DATARRAY *irrad_clear,
@@ -242,71 +241,35 @@ int gen_spect_sky(DATARRAY *tau_clear, DATARRAY *scat_clear,
     fprintf(stderr, "Error setting sky file name\n");
     return 0;
   };
-  if (!snprintf(grndfile, sizeof(grndfile), "%s_ground.hsr", outname)) {
-    fprintf(stderr, "Error setting ground file name\n");
-    return 0;
-  }
-  int xres = 64;
-  int yres = 32;
+  int xres = res;
+  int yres = xres / 2;
   RESOLU rs = {PIXSTANDARD, xres, yres};
   FILE *skyfp = fopen(skyfile, "w");
-  FILE *grndfp = fopen(grndfile, "w");
-  write_hsr_header(grndfp, &rs);
   write_hsr_header(skyfp, &rs);
   VIEW skyview = {VT_ANG, {0., 0., 0.}, {0., 0., 1.}, {0., 1., 0.}, 1.,
                   180.,   180.,         0.,           0.,           0.,
                   0.,     {0., 0., 0.}, {0., 0., 0.}, 0.,           0.};
-  VIEW grndview = {
-      VT_ANG, {0., 0., 0.}, {0., 0., -1.}, {0., 1., 0.}, 1., 180., 180., 0., 0.,
-      0.,     0.,           {0., 0., 0.},  {0., 0., 0.}, 0., 0.};
   setview(&skyview);
-  setview(&grndview);
 
   CNDX[3] = NSSAMP;
 
   FVECT view_point = {0, 0, ER + 10};
   const double radius = VLEN(view_point);
   const double sun_ct = fdot(view_point, sundir) / radius;
-  // for (unsigned int j = 0; j < res; ++j) {
-  //   for (unsigned int i = 0; i < res; ++i) {
-  //     RREAL loc[2];
-  //     FVECT rorg = {0};
-  //     FVECT rdir_sky = {0};
-  //     FVECT rdir_grnd = {0};
-  //     SCOLOR sky_radiance = {0};
-  //     SCOLOR ground_radiance = {0};
-  //     SCOLR sky_sclr = {0};
-  //     SCOLR ground_sclr = {0};
-  //
-  //     pix2loc(loc, &rs, i, j);
-  //     viewray(rorg, rdir_sky, &skyview, loc[0], loc[1]);
-  //     viewray(rorg, rdir_grnd, &grndview, loc[0], loc[1]);
   for (int j = 0; j < yres; ++j) {
     for (int i = 0; i < xres; ++i) {
       RREAL loc[2];
       FVECT rorg = {0};
       SCOLOR radiance = {0};
       SCOLR sky_sclr = {0};
-      // SCOLR ground_sclr = {0};
-      // int j2 = yres - j - 1;
 
-      printf("j = %d, i = %d\n", j, i);
-      // float lon = (i + 0.5) * 360.0 / xres - 180.0;
-      // float lat = (j + 0.5) * 180.0 / yres - 90.0;
       float px = i / (xres - 1.0);
       float py = j / (yres - 1.0);
-      // float altitude = (py * PI) - (PI / 2.0);
-      float altitude = ((1 - py) * PI) - (PI / 2.0);
-      float azimuth = (px * 2.0 * PI) - PI;
+      float lambda = ((1 - py) * PI) - (PI / 2.0);
+      float phi = (px * 2.0 * PI) - PI;
 
-      FVECT rdir = {cos(altitude) * cos(azimuth), cos(altitude) * sin(azimuth),
-                    sin(altitude)};
-      // lat = deg2rad(lat);
-      // lon = deg2rad(lon);
-      //
-      // FVECT rdir = {cos(lat) * cos(lon), cos(lat) * sin(lon), sin(lat)};
-
-      printf("rdir: %.3f %.3f %.3f\n", rdir[0], rdir[1], rdir[2]);
+      FVECT rdir = {cos(lambda) * cos(phi), cos(lambda) * sin(phi),
+                    sin(lambda)};
 
       const double mu = fdot(view_point, rdir) / radius;
       const double nu = fdot(rdir, sundir);
@@ -342,15 +305,11 @@ int gen_spect_sky(DATARRAY *tau_clear, DATARRAY *scat_clear,
 
       scolor2scolr(sky_sclr, radiance, 20);
       putbinary(sky_sclr, LSCOLR, 1, skyfp);
-
-      // scolor2scolr(ground_sclr, ground_radiance, 20);
-      // putbinary(ground_sclr, LSCOLR, 1, grndfp);
     }
   }
   fclose(skyfp);
-  fclose(grndfp);
 
-  // Get solar radiance
+  /* Get solar radiance */
   double sun_radiance[NSSAMP] = {0};
   get_solar_radiance(tau_clear, scat_clear, scat1m_clear, sundir, radius,
                      sun_ct, sun_radiance);
@@ -386,7 +345,6 @@ static DpPaths get_dppaths(const char *dir, const double aod, const char *mname,
 static void set_rayleigh_density_profile(Atmosphere *atmos, char *tag,
                                          const int is_summer,
                                          const double s_latitude) {
-  // Set rayleigh density profile
   if (fabs(s_latitude * 180.0 / PI) > ARCTIC_LAT) {
     tag[0] = 's';
     if (is_summer) {
@@ -459,7 +417,7 @@ int main(int argc, char *argv[]) {
   int got_meridian = 0;
   double grefl = 0.2;
   double ccover = 0.0;
-  int res = 128;
+  int res = 64;
   double aod = AOD0_CA;
   char *outname = "out";
   char *mie_path = getpath("mie_ca.dat", getrlibpath(), R_OK);
