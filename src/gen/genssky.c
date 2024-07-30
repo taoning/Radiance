@@ -31,6 +31,8 @@ const double D6415[NSSAMP] = {0.63231, 1.06171, 1.00779, 1.36423, 1.34133,
                               1.0434,  1.05547, 0.98212, 0.94445, 0.9722,
                               0.82387, 0.87853, 0.82559, 0.75111, 0.78925};
 
+inline static float deg2rad(float deg) { return deg * (PI / 180.); }
+
 /* European and North American zones */
 struct {
   char zname[8]; /* time zone name (all caps) */
@@ -180,8 +182,9 @@ static void write_header(const int argc, char **argv, const double cloud_cover,
     printf("%s ", argv[i]);
   }
   printf("\n");
-  printf("#Cloud cover: %g\n#Ground reflectance: %g\n#Sky map resolution: %d\n\n",
-         cloud_cover, grefl, res);
+  printf(
+      "#Cloud cover: %g\n#Ground reflectance: %g\n#Sky map resolution: %d\n\n",
+      cloud_cover, grefl, res);
 }
 
 static void write_rad(const double *sun_radiance, const FVECT sundir,
@@ -225,6 +228,10 @@ static void write_hsr_header(FILE *fp, RESOLU *res) {
   fputsresolu(res, fp);
 }
 
+static inline float frac(float x) {
+  return x - floor(x);
+}
+
 int gen_spect_sky(DATARRAY *tau_clear, DATARRAY *scat_clear,
                   DATARRAY *scat1m_clear, DATARRAY *irrad_clear,
                   const double cloud_cover, const FVECT sundir,
@@ -239,7 +246,9 @@ int gen_spect_sky(DATARRAY *tau_clear, DATARRAY *scat_clear,
     fprintf(stderr, "Error setting ground file name\n");
     return 0;
   }
-  RESOLU rs = {PIXSTANDARD, res, res};
+  int xres = 64;
+  int yres = 32;
+  RESOLU rs = {PIXSTANDARD, xres, yres};
   FILE *skyfp = fopen(skyfile, "w");
   FILE *grndfp = fopen(grndfile, "w");
   write_hsr_header(grndfp, &rs);
@@ -255,58 +264,87 @@ int gen_spect_sky(DATARRAY *tau_clear, DATARRAY *scat_clear,
 
   CNDX[3] = NSSAMP;
 
-  FVECT view_point = {0, 0, ER};
+  FVECT view_point = {0, 0, ER + 10};
   const double radius = VLEN(view_point);
   const double sun_ct = fdot(view_point, sundir) / radius;
-  for (unsigned int j = 0; j < res; ++j) {
-    for (unsigned int i = 0; i < res; ++i) {
+  // for (unsigned int j = 0; j < res; ++j) {
+  //   for (unsigned int i = 0; i < res; ++i) {
+  //     RREAL loc[2];
+  //     FVECT rorg = {0};
+  //     FVECT rdir_sky = {0};
+  //     FVECT rdir_grnd = {0};
+  //     SCOLOR sky_radiance = {0};
+  //     SCOLOR ground_radiance = {0};
+  //     SCOLR sky_sclr = {0};
+  //     SCOLR ground_sclr = {0};
+  //
+  //     pix2loc(loc, &rs, i, j);
+  //     viewray(rorg, rdir_sky, &skyview, loc[0], loc[1]);
+  //     viewray(rorg, rdir_grnd, &grndview, loc[0], loc[1]);
+  for (int j = 0; j < yres; ++j) {
+    for (int i = 0; i < xres; ++i) {
       RREAL loc[2];
       FVECT rorg = {0};
-      FVECT rdir_sky = {0};
-      FVECT rdir_grnd = {0};
-      SCOLOR sky_radiance = {0};
-      SCOLOR ground_radiance = {0};
+      SCOLOR radiance = {0};
       SCOLR sky_sclr = {0};
-      SCOLR ground_sclr = {0};
+      // SCOLR ground_sclr = {0};
+      // int j2 = yres - j - 1;
 
-      pix2loc(loc, &rs, i, j);
-      viewray(rorg, rdir_sky, &skyview, loc[0], loc[1]);
-      viewray(rorg, rdir_grnd, &grndview, loc[0], loc[1]);
+      printf("j = %d, i = %d\n", j, i);
+      // float lon = (i + 0.5) * 360.0 / xres - 180.0;
+      // float lat = (j + 0.5) * 180.0 / yres - 90.0;
+      float px = i / (xres - 1.0);
+      float py = j / (yres - 1.0);
+      // float altitude = (py * PI) - (PI / 2.0);
+      float altitude = ((1 - py) * PI) - (PI / 2.0);
+      float azimuth = (px * 2.0 * PI) - PI;
 
-      const double mu_sky = fdot(view_point, rdir_sky) / radius;
-      const double nu_sky = fdot(rdir_sky, sundir);
+      FVECT rdir = {cos(altitude) * cos(azimuth), cos(altitude) * sin(azimuth),
+                    sin(altitude)};
+      // lat = deg2rad(lat);
+      // lon = deg2rad(lon);
+      //
+      // FVECT rdir = {cos(lat) * cos(lon), cos(lat) * sin(lon), sin(lat)};
 
-      const double mu_grnd = fdot(view_point, rdir_grnd) / radius;
-      const double nu_grnd = fdot(rdir_grnd, sundir);
+      printf("rdir: %.3f %.3f %.3f\n", rdir[0], rdir[1], rdir[2]);
 
-      get_sky_radiance(scat_clear, scat1m_clear, radius, mu_sky, sun_ct, nu_sky,
-                       sky_radiance);
-      get_ground_radiance(tau_clear, scat_clear, scat1m_clear, irrad_clear,
-                          view_point, rdir_grnd, radius, mu_grnd, sun_ct,
-                          nu_grnd, grefl, sundir, ground_radiance);
+      const double mu = fdot(view_point, rdir) / radius;
+      const double nu = fdot(rdir, sundir);
+
+      /* hit ground */
+      if (rdir[2] < 0) {
+        get_ground_radiance(tau_clear, scat_clear, scat1m_clear, irrad_clear,
+                            view_point, rdir, radius, mu, sun_ct, nu, grefl,
+                            sundir, radiance);
+      } else {
+        get_sky_radiance(scat_clear, scat1m_clear, radius, mu, sun_ct, nu,
+                         radiance);
+      }
 
       for (int k = 0; k < NSSAMP; ++k) {
-        sky_radiance[k] *= WVLSPAN;
-        ground_radiance[k] *= WVLSPAN;
+        radiance[k] *= WVLSPAN;
       }
 
       if (cloud_cover > 0) {
         double zenithbr = get_zenith_brightness(sundir);
         double grndbr = zenithbr * GNORM;
-        double skybr = get_overcast_brightness(rdir_sky[2], zenithbr);
-        for (int k = 0; k < NSSAMP; ++k) {
-          sky_radiance[k] =
-              wmean2(sky_radiance[k], skybr * D6415[k], cloud_cover);
-          ground_radiance[k] =
-              wmean2(ground_radiance[k], grndbr * D6415[k], cloud_cover);
+        double skybr = get_overcast_brightness(rdir[2], zenithbr);
+        if (rdir[2] < 0) {
+          for (int k = 0; k < NSSAMP; ++k) {
+            radiance[k] = wmean2(radiance[k], grndbr * D6415[k], cloud_cover);
+          }
+        } else {
+          for (int k = 0; k < NSSAMP; ++k) {
+            radiance[k] = wmean2(radiance[k], skybr * D6415[k], cloud_cover);
+          }
         }
       }
 
-      scolor2scolr(sky_sclr, sky_radiance, 20);
+      scolor2scolr(sky_sclr, radiance, 20);
       putbinary(sky_sclr, LSCOLR, 1, skyfp);
 
-      scolor2scolr(ground_sclr, ground_radiance, 20);
-      putbinary(ground_sclr, LSCOLR, 1, grndfp);
+      // scolor2scolr(ground_sclr, ground_radiance, 20);
+      // putbinary(ground_sclr, LSCOLR, 1, grndfp);
     }
   }
   fclose(skyfp);
@@ -544,8 +582,8 @@ int main(int argc, char *argv[]) {
 
   char gsdir[PATH_MAX];
   size_t siz = strlen(ddir);
-  if (ISDIRSEP(ddir[siz-1]))
-    ddir[siz-1] = '\0';
+  if (ISDIRSEP(ddir[siz - 1]))
+    ddir[siz - 1] = '\0';
   snprintf(gsdir, PATH_MAX, "%s%catmos_data", ddir, DIRSEP);
   if (!make_directory(gsdir)) {
     fprintf(stderr, "Failed creating atmos_data directory");
